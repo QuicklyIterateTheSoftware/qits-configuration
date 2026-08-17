@@ -16,9 +16,11 @@ container.
 which mirrors the exact repository id `qits-maven` — an exact id match is what gets past Maven's
 `external:http:*` blocker.
 
-**The gate is `./mvnw clean verify`**, and it needs neither node nor a submodule: there is no client
-here. Always `clean` — incremental compilation leaves stale MapStruct `*Impl` classes behind when a
-mapper's shape changes.
+**The gate is `./mvnw clean verify`**, and since the client landed it needs BOTH a node on PATH and
+`git submodule update --init` — `verify` runs `package`, and `package` is where Quinoa builds
+`service/src/main/webui`. An empty webui/ stops it at "No package.json found in Web UI directory".
+`./mvnw test` still needs neither, because Quinoa is off in test mode. Always `clean` — incremental
+compilation leaves stale MapStruct `*Impl` classes behind when a mapper's shape changes.
 
 **`quarkus.http.test-port=0`, deliberately.** Quarkus' default test port is 8081, which on the
 deployment host is the published address of the platform's own npm registry.
@@ -132,9 +134,36 @@ it: that row lives in another physical database, and configuration outlives the 
 described it.
 
 **`quarkus-undertow` must never be on the classpath.** It arrives transitively from anything
-servlet-shaped:
+servlet-shaped, and since the client landed it is load-bearing rather than principled: Quinoa serves
+the bundle through Quarkus' own static-resource route, which undertow's servlet stack takes over and
+then cannot find — a packaged process that answers the API correctly and the SPA with a 404.
 
     ./mvnw -pl service -am dependency:tree | grep -i undertow
+
+## The client
+
+`service/src/main/webui` is the `qits-spa-configuration` submodule (relative url, `ignore = all`,
+`update = merge`, `branch = main` — the sibling shape). Quinoa 2.8.2 is pinned by hand in the root
+pom, because Quinoa is in no BOM and its version does not track the platform's.
+
+- **The segment is spelled twice**, `quarkus.quinoa.ui-root-path` here and `baseHref` in the
+  submodule's `angular.json`. A mismatch serves a page whose every asset 404s and nothing on this
+  side notices, so `PackagedSurfaceIT` asserts the `<base href>` string rather than the status.
+- **`ignored-path-prefixes` values are RELATIVE**, matched after `ui-root-path` is stripped: `/api`
+  and `/q`, never `/configuration/api`. An absolute value matches nothing and is indistinguishable
+  from an unset key. Setting the key REPLACES Quinoa's derivation, which is why both are spelled by
+  hand. **Add a literal route under `/configuration` and its entry here in the same commit** — and
+  give it a segment of its own, because an entry protects a segment and not a string prefix.
+- **The bundle is built OUTSIDE the docker build.** `@qits/ui-components` exists only on the
+  platform's own npm registry, which a `RUN` reaches by no address at all — and npm's answer to a
+  registry that never connects is `Exit handler never called!`, naming neither. So
+  `.config/qits/ci-post-receive.yml` builds it in the step container (on qits-net) and the Dockerfile
+  neuters Quinoa's install/ci/build commands with `--version`, guards the staged bundle with a
+  `test -f` before the multi-minute native compile, and `cp`s the bundle onto itself so Quinoa's
+  MOVE does not hit overlayfs' EXDEV.
+- **Quinoa is off in test mode and stays off.** A `@QuarkusTest` asserting anything about
+  `/configuration/` would pass against a process with no client in it, so every claim about the SPA
+  belongs in `PackagedSurfaceIT`.
 
 ## Tests
 
@@ -175,10 +204,6 @@ Each of these is a decision, not an omission, and each has a place it would land
 - **Change events.** No `qits-eventstream` dependency, no publish, no subscribe. The deployer pulls
   per deployment, so nothing depends on a push. A publisher would arrive with the vocabulary jar
   every other announcing service has.
-- **A client.** No Quinoa, and therefore none of the family of traps the SPA-serving siblings carry
-  (`ignored-path-prefixes`, `build-dir`, the package-manager flags, the `dist/` payload in
-  `.dockerignore`). Copy that recipe from qits-events whole when the SPA lands, including the
-  pipeline half that builds the bundle outside the docker build.
 - **OpenTelemetry export.** The siblings ship `quarkus-opentelemetry` with the four preview keys
   spelled out. This service does not yet; adding it is the extension plus that block, copied from
   qits-events' `application.properties` where the reasoning for each line lives.

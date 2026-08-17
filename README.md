@@ -74,11 +74,12 @@ deployer's health gate curls, and `/configuration/q/openapi` is the document.
 
 ## Running the tests
 
+    git submodule update --init            # the client; `verify` runs `package`, which builds it
     ./mvnw clean verify
 
-No docker, no network beyond Maven Central and the platform's own Maven repository, no credentials.
-The suite spawns a real PostgreSQL of its own — zonky's binaries, resolved as ordinary Maven
-artifacts and started as a child process.
+No docker, no network beyond Maven Central, the platform's own Maven repository and the npm
+registries the client installs from. The suite spawns a real PostgreSQL of its own — zonky's
+binaries, resolved as ordinary Maven artifacts and started as a child process.
 
 To probe the packaged artifact as well:
 
@@ -92,4 +93,30 @@ To probe the packaged artifact as well:
     service/        the adapters — the JAX-RS routes, the exception mapper, and the native-image
                     reflection registration for what Jackson binds.
 
-There is **no client** in v1. A browsing and editing UI is a later phase.
+    service/src/main/webui/  the client — qits-spa-configuration, a git submodule. Quinoa builds it
+                             during `package` and serves it at /configuration/.
+
+## The client
+
+`service/src/main/webui` is the [qits-spa-configuration](https://github.com/QuicklyIterateTheSoftware/qits-spa-configuration)
+submodule, an Angular application Quinoa builds during `package` and serves at `/configuration/`:
+the applications listing, one application's entries with the editor, and its history.
+
+The segment is spelled twice — `quarkus.quinoa.ui-root-path` here and `baseHref` in the submodule's
+`angular.json` — and the two move together; `PackagedSurfaceIT` asserts the agreement, because a
+mismatch serves a page whose every asset 404s with nothing on this side to notice.
+
+**`quarkus.quinoa.ignored-path-prefixes=/api,/q` is what keeps the client from swallowing the API.**
+The SPA fallback is a late-order catch-all, and the deployer's per-deployment read lives under
+`/api` — a machine path answered with `200 index.html` would hand a JSON parser an HTML document on
+the one service whose answer decides what a container starts with. Add a literal route under
+`/configuration` and its prefix entry in the same commit.
+
+**The bundle is built before the image, never inside it.** `@qits/ui-components` lives only on the
+platform's own npm registry, which no `RUN` in a docker build can reach; `.config/qits/ci-post-receive.yml`
+builds it in the step container, and `docker/Dockerfile` neuters Quinoa's install and build commands
+and guards the staged bundle before the native compile.
+
+So a **clone-alone build now means clone AND `git submodule update --init`, with a node on PATH**:
+`verify` runs `package`, and `package` needs both. `./mvnw test` still needs neither, because Quinoa
+is off in test mode.

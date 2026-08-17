@@ -38,7 +38,11 @@ import org.junit.jupiter.api.Test;
  *       over JDBC rather than through the API that wrote it;
  *   <li>every response type reaching Jackson through {@code Response.entity(...)}, which the
  *       build-time analysis cannot see — that is what {@code ApiWireReflection} is for, and a
- *       missing entry there is a 500 in the binary while the JVM suite stays green.
+ *       missing entry there is a 500 in the binary while the JVM suite stays green;
+ *   <li><b>the client is served, and does not swallow the API.</b> Quinoa is disabled by default in
+ *       test mode, so no {@code @QuarkusTest} builds or serves the SPA and every assertion about
+ *       {@code /configuration/} would pass against a process with no client in it. The packaged
+ *       artifact is the only place either half can be proven.
  * </ul>
  *
  * <p><b>This is also the only place the identity contract is real.</b> A {@code @QuarkusTest} runs
@@ -56,6 +60,14 @@ public class PackagedSurfaceIT {
 
   /** The database this IT hands the launched process, on a name of its own. */
   private static final String DATABASE = "configuration_packaged_it";
+
+  /**
+   * The one string that identifies a response as the CLIENT's index.html rather than anything else
+   * this process serves. It is also the string that has to agree with {@code
+   * quarkus.quinoa.ui-root-path} here and with {@code baseHref} in qits-spa-configuration's
+   * angular.json, so the probes below double as the check that all three still do.
+   */
+  private static final String BASE_HREF = "<base href=\"/configuration/\">";
 
   /**
    * Hands the launched artifact a database the way a deployment does — as the generic resource
@@ -157,11 +169,110 @@ public class PackagedSurfaceIT {
     // qits-gateway routes verbatim by prefix, so there is no unprefixed form to fall back to.
     asAdmin().when().get("/api/applications").then().statusCode(404);
 
-    // A mistyped machine path answers Vert.x' own stock page, which is text/html and correct — so
+    // A mistyped machine path answers Quarkus' own stock page, which is text/html and correct — so
     // what is pinned is the status and the absence of anything a client would parse as data.
     String body =
         asAdmin().when().get("/configuration/api/nope").then().statusCode(404).extract().asString();
     assertFalse(body.contains("headRevision"), "a mistyped path must not answer with data: " + body);
+  }
+
+  /**
+   * The client is mounted, and its {@code <base href>} agrees with where it is mounted. The two are
+   * configured in different repositories — {@code quarkus.quinoa.ui-root-path} here, {@code baseHref}
+   * in qits-spa-configuration's angular.json — and a disagreement serves a page that loads and then
+   * fetches its own JavaScript from a path that 404s. Nothing on this side notices, which is why the
+   * string is asserted rather than the status alone.
+   *
+   * <p><b>It answers anonymously, and that is not a hole in "no anonymous surface".</b> That rule is
+   * about this service's DATA: every route in {@link ConfigurationController} is {@code
+   * @RolesAllowed} and the test above pins a 401 for an unauthenticated read. What is served here is
+   * a static bundle with no configuration in it, and the browser that loaded it gets nothing until
+   * qits-gateway's session lets its API calls through.
+   */
+  @Test
+  public void theClientIsServedAtTheSegmentWithABaseHrefThatMatches() {
+    given()
+        .when()
+        .get("/configuration/")
+        .then()
+        .statusCode(200)
+        .contentType(ContentType.HTML)
+        .body(Matchers.containsString(BASE_HREF));
+  }
+
+  /**
+   * A deep link is the SPA fallback doing its job: {@code /configuration/applications/qits-docs} has
+   * no file behind it, and {@code enable-spa-routing} is what makes a reload or a pasted link reach
+   * the Angular router instead of a 404. Both of the client's nested routes are probed, because an
+   * operator shares exactly these two addresses.
+   */
+  @Test
+  public void aDeepLinkFallsBackToTheClientSoTheAngularRouterOwnsIt() {
+    given()
+        .when()
+        .get("/configuration/applications/qits-docs")
+        .then()
+        .statusCode(200)
+        .contentType(ContentType.HTML)
+        .body(Matchers.containsString(BASE_HREF));
+
+    given()
+        .when()
+        .get("/configuration/applications/qits-docs/history")
+        .then()
+        .statusCode(200)
+        .contentType(ContentType.HTML)
+        .body(Matchers.containsString(BASE_HREF));
+  }
+
+  /**
+   * THE HALF THAT COSTS SOMETHING IF IT IS WRONG. The SPA fallback is a late-order catch-all, so a
+   * path under {@code /configuration} that matches no route is rerouted to index.html and answers
+   * {@code 200 text/html} — unless {@code quarkus.quinoa.ignored-path-prefixes} claims it first.
+   *
+   * <p>The stake here is the deployer. Its per-deployment read is {@code
+   * /configuration/api/applications/<app>/resolved}, and a machine path answering a PAGE would hand
+   * a JSON parser an HTML document on the one service whose answer decides what a container starts
+   * with.
+   *
+   * <p><b>What is asserted is the status and the absence of the client's page — not the absence of
+   * HTML.</b> An ignored path falls to Quarkus' own not-found handler, which answers {@code 404
+   * text/html}: a correct refusal wearing a browser's content type. {@link #BASE_HREF} is the
+   * discriminator that means what "never HTML" was reaching for.
+   *
+   * <p>Each entry in the list gets a case here. Add a literal route, add its prefix entry, add its
+   * line below — the same commit.
+   */
+  @Test
+  public void aMistypedMachinePathIs404AndNeverThePage() {
+    // /api — the whole REST surface, including the deployer's resolved read.
+    asAdmin()
+        .when()
+        .get("/configuration/api/nope")
+        .then()
+        .statusCode(404)
+        .body(Matchers.not(Matchers.containsString(BASE_HREF)));
+
+    // /q — health, openapi and swagger-ui. The deployer's health gate curls one of these.
+    given()
+        .when()
+        .get("/configuration/q/nope")
+        .then()
+        .statusCode(404)
+        .body(Matchers.not(Matchers.containsString(BASE_HREF)));
+  }
+
+  /**
+   * A KNOWN WART, PINNED RATHER THAN FIXED. Quinoa mounts the client at {@code ui-root-path + "*"} —
+   * {@code /configuration/*} — which does not match the bare segment, so {@code /configuration}
+   * without the trailing slash is a 404 while {@code /configuration/} is the page (upstream quinoa
+   * issue #960). It affects every client on the platform identically and a redirect would be a
+   * gateway-level decision, so it is deliberately not solved per-service. This test exists so that a
+   * future Quinoa bump changing the behaviour is a failing assertion rather than a surprise.
+   */
+  @Test
+  public void theBareSegmentWithNoTrailingSlashIsStillA404() {
+    given().when().get("/configuration").then().statusCode(404);
   }
 
   @Test

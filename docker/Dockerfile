@@ -11,10 +11,10 @@
 #
 #     docker build -t qits/configuration:latest -f docker/Dockerfile .
 #
-# ONE LINE, because there is no client. The SPA-serving siblings need a submodule checkout and an
-# npm build before this command, since their bundle cannot be built inside a docker build; this
-# service serves machines and an operator, so there is nothing to prepare. When a client arrives,
-# the Quinoa flags and the `test -f` guard arrive with it — copy them from qits-events.
+# THERE IS A CLIENT NOW, and it is NOT built here — it arrives in the build context already built.
+# The whole of why is with the mvnw line below, where the five flags that arrange it live. A
+# host-side build therefore needs `git submodule update --init` and then `npm ci && npm run build`
+# in service/src/main/webui before this command; the CI recipe does both in its first half.
 #
 # --- `docker run` with no configuration FAILS, and that is the honest behaviour -------------------
 # The `configuration` jar's datasource is an EXPRESSION over the platform's generic resource contract
@@ -86,11 +86,63 @@ ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
 # is not possible in this stage — the suite spawns an embedded postgres, and PackagedSurfaceIT (which
 # the `native` profile un-skips) launches the binary against one. `./mvnw verify` on a clone is the
 # gate for those.
+#
+# --- node, and the three command overrides: why the client is NOT built here ----------------------
+# The two `package-manager-install` flags give this stage a node: the Mandrel builder image ships
+# none at all, and Quinoa shells out to npm regardless. They live here rather than in
+# application.properties on purpose — a local or CI `mvnw` build must use the node on PATH, so that
+# no build silently downloads a toolchain. The version is the PLATFORM pin (22.22.0), and it does not
+# have to match the step container's node, because this stage does not build the bundle.
+#
+# service/src/main/webui is qits-spa-configuration, and it depends on @qits/ui-components. That
+# package exists ONLY on the platform's own npm registry (qits-artifacts). A RUN step in a docker
+# build reaches the public internet — Maven Central, npmjs.org, nodejs.org — and reaches the platform
+# registry by NO address: not the qits-net alias, not registry.dev.localhost:8080, not
+# host.docker.internal. So the install cannot happen here.
+#
+# It does not merely fail, it fails unreadably. The SPA commits an .npmrc pointing at the edge's
+# registry vhosts (right for a developer on the deployment host), npm ranks a project .npmrc above
+# ~/.npmrc, and npm's answer to a registry that never connects is `Exit handler never called!` — its
+# own internal-error text, naming neither the registry nor the address.
+#
+# The bundle is therefore built BEFORE this image, by the pipeline step in
+# .config/qits/ci-post-receive.yml, which runs on qits-net where the registry is reachable, and
+# arrives in the build context as service/src/main/webui/dist/ (see .dockerignore, which stops short
+# of excluding exactly that path for this reason). `--version` is the null command: it proves the
+# package manager is really there and does nothing else.
+#
+# THIS DOES NOT FAIL QUIETLY. The `test -f` below stops a context with no bundle before the
+# multi-minute native compile, and Quinoa's own build-dir check would stop it after. A forgotten
+# `npm run build` in the step is a red build, not a service that ships without its client. The same
+# guard covers a context whose webui submodule is NOT initialised: it has no bundle either.
+#
+# --- and why the bundle is copied onto itself first -----------------------------------------------
+# Quinoa does not copy build-dir into target/quinoa/build, it MOVES it, and overlayfs cannot rename a
+# directory that still lives in a LOWER image layer. It answers EXDEV, the JDK falls back to its
+# cross-file-store path, and that path refuses a non-empty directory — the build dies seconds in with
+# `DirectoryNotEmptyException: …/dist/qits-spa-configuration/browser`, which names the source and
+# explains nothing. A builder stage that *creates* dist itself is immune by accident, because dist is
+# then already in the upper layer; ours arrives by COPY, so it is not.
+#
+# One `cp` re-materialises it in the layer that is about to move it. It has to be in THIS `RUN` and
+# not a tidier one of its own — a layer boundary is exactly what it is undoing.
 RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
     --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+    d=service/src/main/webui/dist/qits-spa-configuration/browser; \
+    test -f "$d/index.html" || { \
+      echo "No built client SPA at $d." >&2; \
+      echo "The build context must carry one: run 'npm ci && npm run build'" >&2; \
+      echo "in service/src/main/webui first — this stage cannot, see the Quinoa flags above." >&2; \
+      exit 1; }; \
+    cp -a "$d" "$d.layer" && rm -rf "$d" && mv "$d.layer" "$d" && \
     ./mvnw -B -ntp -s .qits-maven-settings.xml -pl service -am package -Dnative -DskipTests \
       -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
-      -Dquarkus.native.native-image-xmx=4g
+      -Dquarkus.native.native-image-xmx=4g \
+      -Dquarkus.quinoa.package-manager-install=true \
+      -Dquarkus.quinoa.package-manager-install.node-version=22.22.0 \
+      -Dquarkus.quinoa.package-manager-command.install=--version \
+      -Dquarkus.quinoa.package-manager-command.ci=--version \
+      -Dquarkus.quinoa.package-manager-command.build=--version
 
 # --- runtime --------------------------------------------------------------------------------------
 # `mirror.dev.localhost:8080/redhat/…` is the same mirror, pointed at registry.access.redhat.com.
@@ -115,7 +167,7 @@ RUN chmod +x /work/qits-configuration
 EXPOSE 8080
 USER 1001
 
-# Everything this service serves hangs off /configuration — /configuration/api/* and
-# /configuration/q/* — because qits-gateway routes verbatim by prefix. The paths are in
-# application.properties, not here; see README.md.
+# Everything this service serves hangs off /configuration — the client at /configuration/, the API at
+# /configuration/api/* and health, openapi and swagger-ui at /configuration/q/* — because qits-gateway
+# routes verbatim by prefix. The paths are in application.properties, not here; see README.md.
 ENTRYPOINT ["/work/qits-configuration", "-Dquarkus.http.host=0.0.0.0"]

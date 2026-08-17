@@ -1,11 +1,17 @@
 # The pipeline qits-ci runs on every push to a tracked branch of this repository.
 #
-# ONE STEP AND ONE HALF OF IT, which is what makes this file shorter than every SPA-serving
-# sibling's. Those repositories build a client in the step container first, because @qits/ui-components
-# lives only on the platform's own npm registry and a docker build reaches it by no address at all.
-# THIS REPOSITORY HAS NO CLIENT, so there is nothing to build ahead of the image, no submodule to
-# initialise, and no package-lock origin rewriting. When a client arrives, that half arrives with it
-# — copy it from qits-events, which is where that recipe is maintained.
+# ONE STEP, TWO HALVES since this service grew a client, and the split between them is the whole
+# point:
+#
+#   1. build the client SPA (service/src/main/webui = the qits-spa-configuration submodule) HERE, in
+#      the step container, which sits on qits-net and can therefore reach the platform's own npm
+#      registry — where @qits/ui-components lives and where nothing else can reach it from;
+#   2. build this repo's docker/Dockerfile, whose builder stage packages that already-built bundle
+#      and never runs an install.
+#
+# THE PATTERN'S HOME IS qits-gateway AND qits-workspaces — both carry the same two halves for the
+# same reason, and their recipes are where the reasoning is maintained. This one follows them rather
+# than re-deriving it; keep them matching.
 #
 # Publish under the tag that is the whole contract with qits-platform-deployments —
 # <registry>/<repository>/<this repo's name>:<sha>. The step's own container only drives the docker
@@ -14,10 +20,8 @@
 # container's. A failed push is a failed step is a FAILED run, so the CD announcement (SUCCESS only)
 # keeps implying "the image exists".
 steps:
-  # node-docker-base, the image every image-building pipeline on the platform uses. Its node half is
-  # unused here — there is no client — and it stays the image all the same: it is the one that is
-  # built, published and kept current, and a second base image for the sake of a smaller pull would
-  # be a thing to maintain for nothing.
+  # node-docker-base, the image every image-building pipeline on the platform uses: node, npm and git
+  # for half one, the docker CLI for half two.
   - image: qits/build-images/node-docker-base:latest
     docker: true
     timeout-seconds: 3600
@@ -28,6 +32,62 @@ steps:
       # quietly composing a tag against nothing.
       set -eu
 
+      # --- half one: the client -------------------------------------------------------------------
+      # The daemon's clone is shallow and does not recurse, so the qits-spa-configuration submodule at
+      # service/src/main/webui arrives as an empty directory — and the Dockerfile's `test -f` guard
+      # stops the image build on exactly that (Quinoa's own `No package.json found in Web UI
+      # directory` would stop it a moment later). Initialising it here rather than asking the daemon
+      # to clone differently keeps the submodule this repo's business, and the derived URL is what
+      # makes the committed relative one resolve against whichever host this run cloned from.
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-configuration"
+      git -c submodule.qits-spa-configuration.url="$frontend_url" submodule update --init service/src/main/webui
+
+      # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. npm pins a full
+      # resolved URL per package, and the SPA's lockfile is generated on the deployment host, so every
+      # entry names an edge address that does not exist in this container. `npm ci` fetches tarballs
+      # by that URL and never asks the configured registry for them, so the environment below does not
+      # reach them: without this swap the install dies on connection refused. The paths are identical
+      # on every address, so replacing the ORIGIN and keeping the path is all it takes, and the
+      # integrity hashes are what make that safe — bytes from the other address must still hash the
+      # same. The checkout is this step's own; nothing is edited that anyone will read again.
+      #
+      # THE BYTE PLANE IS TWO SERVICES, WHICH IS WHY THE SWAP READS THE PATH. qits-platform-mirror
+      # holds the npmjs pull-through cache; qits-artifacts hosts the @qits scope. No single origin
+      # serves both, so the path is what tells them apart: an entry under the hosted registry's own
+      # pathname — $QITS_NPM_REGISTRY_URL's — is a @qits tarball and gets the hosted origin, and every
+      # other entry gets the proxy's.
+      #
+      # THE ORDER OF THE TWO EXPRESSIONS IS THE WHOLE TRICK. sed applies -e in sequence per line, so
+      # the broad proxy swap runs FIRST and the narrow path-anchored one corrects the @qits entries
+      # after it. The other order lets the broad expression undo the narrow one.
+      #
+      # npm's own knob for exactly this, `--replace-registry-host=always`, cannot do it against a
+      # registry mounted under a path, and could not have told two registries apart either —
+      # qits-workspaces' recipe measures that failure in full.
+      cd service/src/main/webui
+      npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
+      npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
+      sed -i -E \
+        -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
+        -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
+        package-lock.json
+
+      # ENVIRONMENT, not a file. qits-spa-configuration COMMITS an .npmrc (the edge vhosts, right for
+      # a developer on the deployment host), and npm ranks a project .npmrc ABOVE ~/.npmrc — so a
+      # `cat > ~/.npmrc` preamble would be written and silently ignored. `npm_config_*` environment
+      # outranks both files, so it wins without touching the submodule's tree.
+      env npm_config_registry="$QITS_NPM_PROXY_URL" \
+          "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+          npm ci --no-audit --no-fund
+
+      # dist/qits-spa-configuration/browser — the bundle the image build consumes, and the ONE
+      # artifact this half exists to produce. Lint and test are qits-spa-configuration's own
+      # pipeline's job; repeating them here would only make this repo red for someone else's commit.
+      npm run build
+      cd -
+
+      # --- half two: the image --------------------------------------------------------------------
       # --network host, NOT a custom network: buildkit (the builder format the platform targets — a
       # swarm cannot assume the legacy builder) refuses custom networks on a build. Host networking
       # is buildkit-supported, and the maven registry's host-published address is derived from the
