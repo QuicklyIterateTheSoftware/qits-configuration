@@ -1,0 +1,40 @@
+# How qits-platform-deployments deploys this repo. It reads this file from the git host at the built
+# sha, so the answer travels with the commit.
+#
+# CARRYING THE FILE AT ALL is the other thing it says. qits-workspaces reads it on a release to
+# decide whether this repository deploys — a library or an SPA carries none and its release is the
+# trunk push alone — and then promotes onto the branch it is configured with.
+#
+# ENVIRONMENT service: every environment runs its own instance, holding that environment's
+# configuration, and a green build deploys into whichever tier listens to the built branch. It is
+# not a platform service and must not become one: two tiers sharing one configuration store would
+# make an edit in dev an edit in prod.
+#
+# `deployment_target` is written out here rather than left to its default because this is the one
+# key a reader of this file will want to check first, and the answer is a decision rather than an
+# omission.
+deployment_target: environment
+
+# There is no client, so the route is the API and the document. `navigation` is deliberately absent:
+# nothing here renders in a browser yet, and an entry pointing at a bare API would be a menu item
+# that answers JSON. It arrives with the SPA, in the same commit.
+routes: /configuration
+
+# THE STORE, DECLARED RATHER THAN CONFIGURED. The line below is what provisions it: a role and a
+# database of its own on the tier's postgres, created before the successor container starts and
+# injected as QITS_RESOURCE_DB_URL / _USERNAME / _PASSWORD — the generic contract the configuration
+# jar's datasource defaults read verbatim.
+#
+# The third segment is omitted, so the database is the default derivation: the application name minus
+# its `qits-` prefix, dashes to underscores, under a `qits_` prefix — `qits_configuration`. Spelling
+# it out would be a second place for one answer to be wrong in.
+#
+# Provisioning is idempotent and the credential lives in the deployer's registry, so a redeploy finds
+# the existing row and injects the password this process is already connected with.
+resources: postgresql:db
+
+# The readiness endpoint the deployer's health gate curls. The convention derives it from the
+# repository name and would land on exactly this path — it is written out because this service is
+# the one the deployer reads its own configuration from, and a probe that 404s here fails a
+# deployment for a reason nobody would look for in a config file.
+health_path: /configuration/q/health/ready

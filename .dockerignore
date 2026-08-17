@@ -1,0 +1,34 @@
+# Build context trim for `docker build -f docker/Dockerfile .` (root context, whole reactor).
+#
+# docker/Dockerfile deliberately does `COPY . .` rather than listing modules: the reactor builds
+# service's dependency from source (`configuration` is never published), and a module list would have
+# to be edited every time a module is added. This file is what makes that cheap — it drops everything
+# the build does not need, so adding a module stays free and no stale output leaks in.
+
+.git
+.gitignore
+
+# Maven / Quarkus build output — regenerated inside the build stage, and hundreds of megabytes of it
+# here. Copying it in would also risk a stale target/ shadowing what the stage compiles.
+**/target
+**/target-ide
+
+# THERE IS NO CLIENT HERE, so this file carries none of the Quinoa-shaped exceptions its SPA-serving
+# siblings do: no node_modules, no `.angular`, and above all no "do NOT exclude dist/" note. When a
+# client arrives, copy that block from qits-events along with the rest of the recipe.
+
+# Local env / IDE cruft. `.env` is per-machine Quarkus overrides read at ordinal 295 — above the
+# packaged application.properties — so shipping one into the build context would let a developer's
+# local value quietly outrank what the image is supposed to run with.
+.env
+.idea
+.vscode
+.settings
+.sdkmanrc
+
+# Docs and the docker/ dir itself: nothing in the build reads them, and keeping them out means
+# editing this Dockerfile does not bust the `COPY . .` layer. `configuration/` is a MODULE, not
+# prose — it stays.
+*.md
+docs
+docker
