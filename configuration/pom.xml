@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-configuration</artifactId>
+        <version>2026.817.000000</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- The configuration domain: a versioned deployment-configuration entry. A plain library jar —
+         entity, persistence, control, mapper, dto, error — with NO web/JAX-RS in it; the REST
+         boundary is `service`'s, the same split every qits context carries.
+
+         It owns its OWN named datasource + persistence unit + Flyway lineage — its own PostgreSQL
+         database, provisioned by qits-platform-deployments from the `resources: postgresql:db` line
+         in .config/qits/deployments.yml and handed over as QITS_RESOURCE_DB_URL / _USERNAME /
+         _PASSWORD (see src/main/resources/META-INF/microprofile-config.properties, ordinal 100).
+
+         The directory is `configuration/` and the artifactId `qits-configuration-domain`: the
+         directory names the context, the artifactId names the layer. -->
+    <artifactId>qits-configuration-domain</artifactId>
+    <name>qits-configuration :: domain</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-orm-panache</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The context's store. Declared rather than configured: `.config/qits/deployments.yml`
+                 says `resources: postgresql:db` and the deployer creates the role and the database
+                 before this service's container starts. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Two things, and the second is why this is compile scope. PatientPgDriver, which the
+                 datasource this module ships opens every connection through, is named only by the
+                 `jdbc.driver` line in META-INF/microprofile-config.properties — the dependency sits
+                 beside that line so the two cannot drift apart. DbRetry.inNewTx is named by
+                 ConfigurationService: every write path runs inside it. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Flyway 10 split its database support out of the core: without this module Flyway
+                 refuses a postgres url with "no database found to handle". It sits here because
+                 this module owns the lineage. -->
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.mapstruct</groupId>
+            <artifactId>mapstruct</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The store every @QuarkusTest in this module boots against. Zonky spawns real
+                 postgres binaries as a child process — a maven dependency rather than a container —
+                 which is what keeps the clone-alone, docker-free rule true.
+                 persistence/EmbeddedPg + persistence/EmbeddedPgConfigSource hand the running
+                 instance to Quarkus. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- Named per architecture on purpose: the binaries are separate artifacts and zonky
+                 picks one at run time, so an unnamed arch fails in the middle of a suite rather
+                 than during resolution. These three are what this platform is built and developed
+                 on. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
