@@ -1,6 +1,6 @@
 [submodule "qits-spa-configuration"]
 	path = service/src/main/webui
-	url = ../qits-spa-configuration.git
+	url = https://github.com/QuicklyIterateTheSoftware/qits-spa-configuration.git
 	ignore = all
 	update = merge
 	branch = main

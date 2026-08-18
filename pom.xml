@@ -37,7 +37,7 @@
          is meant to be edited by hand. Deliberately NOT a -SNAPSHOT: the image build resolves this
          reactor from source, so a snapshot coordinate would only invite a resolver to look for one
          in a repository that will never hold it. -->
-    <version>2026.817.185530</version>
+    <version>2026.818.62153</version>
     <packaging>pom</packaging>
     <name>qits-configuration</name>
 
@@ -56,9 +56,9 @@
              qits-integrations-quarkus. The url is a property so the image build can point it at the
              address the builder container can actually reach — see docker/Dockerfile and
              .qits-maven-settings.xml. -->
-        <qits.db-core.version>2026.815.141521</qits.db-core.version>
-        <qits.auth-core.version>2026.815.141521</qits.auth-core.version>
-        <qits.arch-rules.version>2026.815.141521</qits.arch-rules.version>
+        <qits.db-core.version>2026.817.175344</qits.db-core.version>
+        <qits.auth-core.version>2026.817.175344</qits.auth-core.version>
+        <qits.arch-rules.version>2026.817.175344</qits.arch-rules.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
