@@ -89,6 +89,25 @@
             <artifactId>quarkus-smallrye-openapi</artifactId>
         </dependency>
         <dependency>
+            <!-- The platform event bus client. Joining it here turns this deployable into a
+                 subscriber: the outbox's datasource, its Flyway lineage, the durable-consumer tables
+                 and the catch-up sweeper all arrive with this jar, configured by the defaults it
+                 ships (its own META-INF/microprofile-config.properties). It brings quarkus-scheduler
+                 and quarkus-websockets-next, both NEW to this deployable. The only thing this module
+                 says about it is where it is dark — see application.properties. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventstream</artifactId>
+        </dependency>
+        <dependency>
+            <!-- qits-ci's event vocabulary, the ONE compile-time dependency this service has on
+                 another context. It is a vocabulary rather than a client: the `SoftwareRelease`
+                 record and the bus, no HTTP and nothing to call. bus/SoftwareReleaseListener reads
+                 the payload by name and bus/EventWireReflection registers the class for the native
+                 binary, both compile-time uses that belong in the pom that makes them. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-ci-events</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit</artifactId>
             <scope>test</scope>

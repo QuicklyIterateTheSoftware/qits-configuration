@@ -59,6 +59,15 @@
         <qits.db-core.version>2026.817.175344</qits.db-core.version>
         <qits.auth-core.version>2026.817.175344</qits.auth-core.version>
         <qits.arch-rules.version>2026.817.175344</qits.arch-rules.version>
+        <!-- The platform event bus client (qits-eventstream) and qits-ci's event vocabulary
+             (qits-ci-events). This service SUBSCRIBES: it consumes qits-ci's `SoftwareRelease` off
+             the durable bus and, for the project-agent image, writes the released version into its
+             own config store. The eventstream jar brings the outbox datasource, the durable-consumer
+             tables and the catch-up sweeper; the ci-events jar carries the one record it registers
+             for native reflection. Both pins match qits-ci's current main, the same versions those
+             consumers already resolve. -->
+        <qits.eventstream.version>2026.818.45652</qits.eventstream.version>
+        <qits.ci-events.version>2026.821.52538</qits.ci-events.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -182,6 +191,24 @@
                 <groupId>io.quarkiverse.quinoa</groupId>
                 <artifactId>quarkus-quinoa</artifactId>
                 <version>${quinoa.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The platform event bus, published by qits-eventstream into the platform Maven
+                     repository. `service/` joins it to become a subscriber: the outbox datasource,
+                     the durable-consumer tables, the catch-up sweeper and the stream subscriber all
+                     arrive with this jar, configured by the defaults it ships. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-eventstream</artifactId>
+                <version>${qits.eventstream.version}</version>
+            </dependency>
+            <dependency>
+                <!-- qits-ci's event vocabulary — the `SoftwareRelease` record this service consumes.
+                     A data module (one dependency, qits-eventstream, no container), the qits-githost
+                     -events shape. Named by `bus/EventWireReflection` so the native binary can bind
+                     it. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-ci-events</artifactId>
+                <version>${qits.ci-events.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
