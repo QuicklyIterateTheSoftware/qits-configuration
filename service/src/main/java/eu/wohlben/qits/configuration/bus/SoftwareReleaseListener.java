@@ -1,10 +1,9 @@
 package eu.wohlben.qits.configuration.bus;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.configuration.control.ConfigurationService;
 import eu.wohlben.qits.configuration.entity.ConfigurationEntry;
 import eu.wohlben.qits.eventstream.QitsDurableEventListener;
+import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -23,11 +22,11 @@ import org.jboss.logging.Logger;
  * mid-cutover. A {@link QitsDurableEventListener} closes that: the release is caught up after a
  * restart, and the write happens exactly once per release the platform can be sure of.
  *
- * <p>It adapts inward the way qits-ci's own consumers do — an {@link EventFrame} becomes a payload
- * read by name, so this module imports no publish/subscribe type and no qits-ci internals beyond the
- * {@code SoftwareRelease} vocabulary jar. There is no typed binding: the payload is walked with
- * {@code readTree}, which is also why {@link #matchedVersion} needs no native reflection metadata of
- * its own.
+ * <p>It adapts inward the way the platform's other consumers do — an {@link EventFrame} is decoded
+ * into a local {@link SoftwareReleasePayload} record by the eventstream lib's {@link CanonicalJson},
+ * so this module depends on no qits-ci module at all. The record is registered for native reflection
+ * in {@code bus/EventWireReflection}, because {@code CanonicalJson} binds through its own
+ * ObjectMapper the build step cannot see.
  *
  * <h2>The match, and why by the wire strings</h2>
  *
@@ -88,8 +87,14 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
   /** Who the revision records as the writer, the way {@code ConfigurationController.actor()} does. */
   static final String ACTOR = "qits-configuration/software-release-listener";
 
-  /** A plain read of already-parsed platform data — no reflection metadata, the qits-ci precedent. */
-  private static final ObjectMapper MAPPER = new ObjectMapper();
+  /**
+   * The {@code SoftwareRelease} payload wire fields this listener reads, as a local record bound by
+   * {@link CanonicalJson}. Only the four the match and the pin need — {@code occurredAt} is on the
+   * envelope, not the payload, so it is not here. Public so {@code bus/EventWireReflection} and the
+   * test can name it; a copy of qits-ci's wire shape rather than a dependency on its module.
+   */
+  public record SoftwareReleasePayload(
+      String repository, String version, String packageType, String packageName) {}
 
   @Inject ConfigurationService configuration;
 
@@ -140,23 +145,22 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
    * The version this frame releases for {@code qits/project-agent}, or null when it releases
    * something else or cannot be read at all. Asked twice per event — once by {@link #selects}, once
    * by {@link #onFrame} — because a predicate the seam calls separately cannot hand state forward,
-   * and one more {@code readTree} of an already-in-memory string is cheaper than a per-frame cache
+   * and one more decode of an already-in-memory string is cheaper than a per-frame cache
    * that could disagree with itself.
    */
   private static String matchedVersion(EventFrame frame) {
-    JsonNode payload;
+    SoftwareReleasePayload p;
     try {
-      payload = MAPPER.readTree(frame.payload());
-    } catch (Exception unreadable) {
+      p = CanonicalJson.payloadTo(frame.payload(), SoftwareReleasePayload.class);
+    } catch (RuntimeException unreadable) {
       LOG.warnf(
           "SoftwareRelease %s carried an unreadable payload: %s", frame.id(), unreadable.toString());
       return null;
     }
-    if (!DOCKER_TYPE.equals(payload.path("packageType").asText(null))
-        || !PROJECT_AGENT_IMAGE.equals(payload.path("packageName").asText(null))) {
+    if (!DOCKER_TYPE.equals(p.packageType()) || !PROJECT_AGENT_IMAGE.equals(p.packageName())) {
       return null;
     }
-    String version = payload.path("version").asText(null);
+    String version = p.version();
     if (version == null || version.isBlank()) {
       // Poison: the image matched but there is nothing to pin, and the same bytes will match-and-fail
       // on every later offer. Settle it with a WARN rather than wedge the watermark behind it.

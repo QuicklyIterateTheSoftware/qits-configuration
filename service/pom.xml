@@ -99,15 +99,6 @@
             <artifactId>qits-eventstream</artifactId>
         </dependency>
         <dependency>
-            <!-- qits-ci's event vocabulary, the ONE compile-time dependency this service has on
-                 another context. It is a vocabulary rather than a client: the `SoftwareRelease`
-                 record and the bus, no HTTP and nothing to call. bus/SoftwareReleaseListener reads
-                 the payload by name and bus/EventWireReflection registers the class for the native
-                 binary, both compile-time uses that belong in the pom that makes them. -->
-            <groupId>${project.groupId}</groupId>
-            <artifactId>qits-ci-events</artifactId>
-        </dependency>
-        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit</artifactId>
             <scope>test</scope>

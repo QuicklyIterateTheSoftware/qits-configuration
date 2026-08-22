@@ -1,30 +1,42 @@
 package eu.wohlben.qits.configuration.bus;
 
-import eu.wohlben.qits.ci.events.SoftwareRelease;
+import eu.wohlben.qits.eventstream.control.EventFrame;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
- * What crosses the event wire into this service, told to native-image. No code, no bean, nothing at
- * runtime: the annotation is the whole content, and this class exists so the annotation has
- * somewhere to live that can say why.
+ * Native-image reflection registration for every type the event bus binds JSON to on the CONSUME
+ * path — a class with no code, only the annotation.
  *
- * <p><b>Why it is not found automatically.</b> The eventstream jar canonicalises and binds JSON with
- * an {@code ObjectMapper} it builds by hand — the canonical form is a wire contract compared
- * byte-for-byte, so it must not be downstream of any application's customizer. To the build step
- * scanning for what needs reflecting on, that mapper and everything it touches are invisible. The
- * measured cost of the omission, on qits-ci's deployed binary, was Jackson's {@code No serializer
- * found for class … native image, you may need to configure reflection} — a record with no
- * reflection metadata has no components to find. See qits-ci's {@code EventWireReflection} for the
- * full account.
+ * <p><b>Nothing registers these automatically, and the reason is deliberate on the library's
+ * side.</b> {@code CanonicalJson} builds its own {@code ObjectMapper} rather than injecting the CDI
+ * one — the payload string is a byte-for-byte wire contract a consuming application's customizers
+ * must not reach — so the graph that mapper binds is invisible to the build step that scans for what
+ * needs reflecting on. On a JVM these bind whether anyone registered them or not, which is exactly
+ * what lets the omission survive a green suite: the failure is in the binary, at runtime, on the
+ * first frame.
  *
- * <p><b>Why only {@link SoftwareRelease}.</b> It is the one event this service consumes. The
- * envelope and frame types the bus itself binds — {@code EventFrame}, {@code EventPage} — carry their
- * own {@code @RegisterForReflection} inside the eventstream jar, and this service publishes nothing,
- * so no envelope or mix-in registration belongs here. A listener for a second event type adds its
- * class to this list in the same commit.
+ * <p>This service consumes and publishes nothing, so it registers only the consume path:
+ *
+ * <ul>
+ *   <li>{@link EventFrame} — a live frame off {@code /events/stream}, and every row of the catch-up
+ *       log, which binds to the same record.
+ *   <li>{@code EventPage} — one page of {@code GET /events/api/events}, by string name because it is
+ *       package-private in the library. Without it the stream works in the binary and <b>catch-up
+ *       alone</b> fails — the half that only matters after a cutover.
+ *   <li>{@link SoftwareReleaseListener.SoftwareReleasePayload} — the payload this component reads out
+ *       of the frame.
+ *   <li>The {@code CanonicalJson$QitsEventMixin}, by string name because it is a nested type inside
+ *       the library — the mix-in that keeps {@code eventId} out of the payload, so its absence is a
+ *       payload silently gaining a field the contract omits.
+ * </ul>
  */
-@RegisterForReflection(targets = {SoftwareRelease.class})
-public final class EventWireReflection {
+@RegisterForReflection(
+    targets = {EventFrame.class, SoftwareReleaseListener.SoftwareReleasePayload.class},
+    classNames = {
+      "eu.wohlben.qits.eventstream.control.EventPage",
+      "eu.wohlben.qits.eventstream.control.CanonicalJson$QitsEventMixin"
+    })
+final class EventWireReflection {
 
   private EventWireReflection() {}
 }
