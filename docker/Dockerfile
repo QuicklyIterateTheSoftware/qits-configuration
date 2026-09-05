@@ -87,6 +87,13 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 # is pullable, and a build arg is recorded where anyone who pulls it can read it.
 # `.qits-maven-settings.xml` reads the two variables as the `qits-maven-network` server.
 #
+# FILE FORM (`/run/secrets/<id>`, read into the command's own environment below), never the `env=`
+# mount form these two lines used to carry. `env=` needs a dockerfile frontend the BUILDER chooses,
+# and since the builds moved to the platform's buildkitd the frontend is the builder's to pick, not
+# this file's; the bare file mount is served identically by every frontend version. Absent secrets
+# leave both variables empty — `|| true` is every hand build's state — which the settings read
+# exactly as they read unset.
+#
 # -Dnative flips quarkus.native.enabled (service/pom.xml carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.
 #
@@ -134,8 +141,10 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 #
 # One `cp` re-materialises it in the layer that is about to move it. It has to be in THIS `RUN` and
 # not a tidier one of its own — a layer boundary is exactly what it is undoing.
-RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
-    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    export QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)"; \
+    export QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)"; \
     d=service/src/main/webui/dist/qits-spa-configuration/browser; \
     test -f "$d/index.html" || { \
       echo "No built client SPA at $d." >&2; \

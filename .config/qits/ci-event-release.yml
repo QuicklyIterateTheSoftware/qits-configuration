@@ -17,11 +17,12 @@
 #   it cannot see what the step pushed; it announces on the strength of the line below. ONE entry,
 #   because this pipeline pushes one image and this repository publishes no jar, no npm package and
 #   no docs bundle — there is no committed docs/openapi.yml here to make an @apidocs entry true.
-# - THE NAME IS UNQUALIFIED ON PURPOSE — the registry is `qits-platform-artifacts:8080` inside a
-#   step container and `registry.dev.localhost:8080` outside, and an OCI reference cannot carry a
-#   path prefix. The reader supplies its own host, exactly as the push below composes one from
-#   environment. `qits/qits-configuration` is the image .config/qits/deployments.yml names as this
-#   repository's application, and the two must keep agreeing.
+# - THE NAME IS UNQUALIFIED ON PURPOSE — the registry is one service under several addresses
+#   ($QITS_BUILD_REGISTRY as the platform builder resolves it, $QITS_REGISTRY as the host daemon and
+#   qits-deployments do, `registry.dev.localhost:8080` from outside) and an OCI reference cannot
+#   carry a path prefix. The reader supplies its own host, exactly as the push below composes one
+#   from environment. `qits/qits-configuration` is the image .config/qits/deployments.yml names as
+#   this repository's application, and the two must keep agreeing.
 # - THE SBOM IS UPLOADED HERE, AND ONLY HERE. docker/Dockerfile grew a `sbom` stage — a `FROM
 #   scratch` carrying the service module's CycloneDX document — and the last block of the step
 #   exports it and PUTs it beside the image, the shape qits-observability and qits-docs already
@@ -39,11 +40,15 @@
 #   Only the steps themselves are a release behind. So: when a change to this file must be proven,
 #   prove it on the NEXT release rather than on its own, and do not read a missing artifact on the
 #   release that introduced its step as a failure.
-# - THE BUILD BELOW IS THE QA PIPELINE'S, AND THE TWO SHOULD STAY MATCHED.
-#   ci-event-release-request.yml's gating step is where the client prelude, the lockfile origin
-#   swap, the `npm_config_*` environment and the two docker flags are explained at length; this one
-#   carries the short form and points there rather than keeping a second copy of the reasoning to
-#   drift.
+# - THE BUILD BELOW IS THE QA PIPELINE'S, AND THE TWO MUST STAY MATCHED — byte for byte in every
+#   buildctl argument, because the platform builder's cache is shared and a matched build is what
+#   makes a release that follows a green fold a stack of cache hits rather than a second native
+#   compile. ci-event-release-request.yml's gating step is where the client prelude, the lockfile
+#   origin swap, the `npm_config_*` environment and the whole builder arrangement (`build: true`,
+#   the file-form secrets, why there is no `--network host` any more) are explained at length; this
+#   one carries the short form and points there rather than keeping a second copy of the reasoning
+#   to drift. The one deliberate difference is the `--output`: this pipeline publishes, that one
+#   does not.
 # - THERE IS DELIBERATELY NO `checkout:`. The event's `branch` is the release request's backing
 #   branch (`release/<id>`), which qits-projects deletes in the same operation that creates the tag,
 #   so by the time this runs the branch the event names does not exist. A trigger with no
@@ -79,17 +84,26 @@ artifacts:
   - { type: docker, name: qits/qits-configuration }
 steps:
     # node-docker-base, the image the QA pipeline's gating step already uses: node, npm and git for
-    # half one, the docker CLI for half two — and node is also what reads the event payload, which
-    # is JSON.
+    # half one, buildctl for half two — and node is also what reads the event payload, which is
+    # JSON.
+    #
+    # `build: true`, NOT `docker: true`: this step builds through the platform's own buildkitd and
+    # wants no docker socket at all. See ci-event-release-request.yml and qits-buildkit-plan.md.
   - image: qits/build-images/node-docker-base:latest
-    docker: true
+    build: true
     timeout-seconds: 3600
     script: |
-      # The daemon runs this with `bash -c` and no -e, so without this a failed docker build is
-      # swallowed: the push fails, the run reports SUCCESS, and qits-ci announces a SoftwareRelease
-      # for an image that does not exist — which the deployment flow then tries to deploy. -u makes
-      # an unset registry variable stop the step too.
+      # The daemon runs this with `bash -c` and no -e, so without this a failed build is swallowed:
+      # the push fails, the run reports SUCCESS, and qits-ci announces a SoftwareRelease for an image
+      # that does not exist — which the deployment flow then tries to deploy. -u makes an unset
+      # injected variable stop the step too, rather than let a ref be composed out of empty strings.
       set -eu
+
+      # The builder and the registry AS THE BUILDER RESOLVES IT, both demanded loudly before
+      # anything is built. Unset means a qits-ci/qits-containers pair too old to inject them; EMPTY
+      # means the kill switch. ci-event-release-request.yml has the full note.
+      : "${BUILDKIT_HOST:?the platform builder is off or not injected; this recipe builds only through it}"
+      : "${QITS_BUILD_REGISTRY:?}"
 
       # THE EVENT, READ AS DATA. The payload reaches the container verbatim as one string in
       # $QITS_EVENT_PAYLOAD; there is no per-field projection.
@@ -148,29 +162,35 @@ steps:
       cd -
 
       # --- half two: the image ------------------------------------------------------------------
-      # --network host, NOT a custom network: buildkit — the builder format the platform targets,
-      # because a swarm cannot assume the legacy builder — refuses custom networks on a build. The
-      # maven registry's host-published address is derived from the same injected env, so no address
-      # is stated here; the build needs it because this repo depends on qits-db-core, qits-auth-core
-      # and qits-arch-rules.
+      # THE CREDENTIAL GOES IN AS A FILE, on both sides of the wire, and never as a build arg — an
+      # arg is recorded in the history of a pullable image. Written under umask 077 into /tmp, which
+      # is outside the clone, so neither file can enter the build context; the Dockerfile's mvnw RUN
+      # mounts them as bare files under /run/secrets. `${…:-}` keeps the old property that a run
+      # carrying no commissioned pair is not an error.
+      umask 077
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_ID:-}" > /tmp/qits-client-id
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_SECRET:-}" > /tmp/qits-client-secret
+
+      # NO --network host, AND NOTHING REPLACES IT: a `RUN` executes in the builder's own namespace
+      # on qits-net, so the platform's Maven repository and the Central pull-through are dialled by
+      # their IN-NETWORK addresses ($QITS_MAVEN_REGISTRY_URL, $QITS_MAVEN_PROXY_URL) rather than the
+      # host-published and edge spellings the old flag reached. The Dockerfile's FROM lines keep
+      # their committed edge-vhost spellings; the builder's registry config rewrites them.
       #
-      # THE CREDENTIAL IS A SECRET MOUNT AND NEVER A BUILD ARG — an arg is recorded in the history
-      # of a pullable image. The launcher injects the run's commissioned idp client as
-      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET; the Dockerfile's mvnw RUN
-      # mounts both. Unconditional on purpose: a missing env source is NOT an error — measured on
-      # buildx v0.36.1 — so these lines are inert until a run carries the pair.
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-configuration:$version"
-      docker build --network host \
-        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
-        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
-        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
-        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
-        -t "$ref" -f docker/Dockerfile .
-      docker push "$ref"
-      # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
-      # cache either way — while under the containerd image store it drops the last reference to
-      # content a concurrent build of this same Dockerfile may still be resolving, which is the race
-      # that broke the release of 2026-08-11.
+      # `push=true` IS THE PUBLISH: the image goes from the builder straight to the registry and
+      # never enters any local image store — which is why there is no `docker rmi` question left,
+      # and why the old note about a concurrent-build rmi race (the one that broke the release of
+      # 2026-08-11) describes a store this pipeline no longer touches. $QITS_BUILD_REGISTRY is the
+      # registry as the BUILDER resolves it; $QITS_REGISTRY stays the host daemon's view and is not
+      # dialled here.
+      ref="$QITS_BUILD_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-configuration:$version"
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
+        --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output "type=image,name=$ref,push=true"
 
       # --- the SBOM -----------------------------------------------------------------------------
       # THE DOCUMENT GOES UP AFTER THE PUSH AND BEFORE THIS STEP EXITS GREEN. qits-ci announces
@@ -178,17 +198,20 @@ steps:
       # ever told about a version whose bill of materials is missing. A failed PUT fails the release
       # ON PURPOSE — the store being down is not a reason to announce a version nobody can audit.
       #
-      # The second `docker build` reaches the Dockerfile's `sbom` stage — a `FROM scratch` holding
-      # only the service module's CycloneDX document, exported with `--output` instead of pushed.
-      # Args and secrets are BYTE-IDENTICAL to the image build above, which is what makes every
-      # layer a cache hit and this export seconds rather than a second native compile; a drift
-      # between the two invocations costs a full rebuild, not a wrong document.
-      docker build --network host --target sbom --output type=local,dest=.sbom \
-        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
-        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
-        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
-        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
-        -f docker/Dockerfile .
+      # The second `buildctl build` reaches the Dockerfile's `sbom` stage — a `FROM scratch` holding
+      # only the service module's CycloneDX document, exported with `type=local` instead of pushed.
+      # Build-args and secrets are BYTE-IDENTICAL to the image build above, which is what makes
+      # every layer a cache hit in the same builder and this export seconds rather than a second
+      # native compile; a drift between the two invocations costs a full rebuild, not a wrong
+      # document.
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt target=sbom \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
+        --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output type=local,dest=.sbom
       # The SBOM store is a sibling path of the npm registry in the qits-platform-artifacts
       # deployment, so its root is DERIVED from $QITS_NPM_REGISTRY_URL — the qits-net alias this
       # container dials itself, the same reading of "reachable from where" the bundle half above
