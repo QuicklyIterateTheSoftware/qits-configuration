@@ -33,7 +33,7 @@
 deployment_target: platform
 
 # WHAT THIS REPOSITORY DEPLOYS AS, held still across the repository rename. The repository is
-# qits-configuration-service now; the application is still qits-configuration, so nothing that is
+# qits-configuration-platform-service now; the application is still qits-configuration, so nothing that is
 # running moves: the swarm service and its wire alias, the container, the image
 # qits/qits-configuration the build pushes, the provisioned database, the derived host label, the
 # extras family and the QITS_APPLICATION the container boots with all keep the names they have.
