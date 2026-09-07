@@ -1,4 +1,4 @@
-# qits-configuration-service
+# qits-configuration-platform-service
 
 Deployment configuration as platform state: the entries an environment's applications are deployed
 with, stored, versioned and served.
@@ -111,14 +111,14 @@ To probe the packaged artifact as well:
     service/        the adapters — the JAX-RS routes, the exception mapper, and the native-image
                     reflection registration for what Jackson binds.
 
-    service/src/main/webui/  the client — qits-configuration-frontend, a git submodule. Quinoa
+    service/src/main/webui/  the client — qits-configuration-platform-frontend, a git submodule. Quinoa
                              builds it during `package` and serves it at / on this service's own
                              host.
 
 ## The client
 
 `service/src/main/webui` is the
-[qits-configuration-frontend](https://github.com/QuicklyIterateTheSoftware/qits-configuration-frontend)
+[qits-configuration-platform-frontend](https://github.com/QuicklyIterateTheSoftware/qits-configuration-platform-frontend)
 submodule, an Angular application Quinoa builds during `package` and serves at the **root** of this
 service's own host, `configuration.<env>.<domain>`: the applications listing, one application's
 entries with the editor, and its history. The same pages are addressable per repository —

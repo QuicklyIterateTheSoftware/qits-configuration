@@ -1,4 +1,4 @@
-# qits-configuration-service — working notes
+# qits-configuration-platform-service — working notes
 
 Read `README.md` first: it defines the model and lists the routes. This file is the working
 conventions on top of it.
@@ -156,7 +156,7 @@ then cannot find — a packaged process that answers the API correctly and the S
 
 ## The client
 
-`service/src/main/webui` is the `qits-configuration-frontend` submodule (relative url,
+`service/src/main/webui` is the `qits-configuration-platform-frontend` submodule (relative url,
 `ignore = all`, `update = merge`, `branch = main` — the sibling shape). Quinoa 2.8.2 is pinned by hand in the root
 pom, because Quinoa is in no BOM and its version does not track the platform's.
 
