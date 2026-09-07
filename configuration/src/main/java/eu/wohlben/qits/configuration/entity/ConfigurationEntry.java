@@ -31,14 +31,26 @@ import java.util.UUID;
     name = "configuration_entry",
     uniqueConstraints =
         @UniqueConstraint(
-            name = "uq_configuration_entry_application_key",
-            columnNames = {"application", "key"}))
+            name = "uq_configuration_entry_env_application_key",
+            columnNames = {"env", "application", "key"}))
 public class ConfigurationEntry extends PanacheEntityBase {
 
   /** The plain entry class, and the only one v1 writes. See {@link #entryClass}. */
   public static final String CLASS_PLAIN = "plain";
 
   @Id public UUID id;
+
+  /**
+   * The environment this entry belongs to, dns-label-shaped like {@link #application}.
+   *
+   * <p><b>It is part of the entry's identity, not a label on it.</b> This service runs on the
+   * platform plane and holds every environment's configuration in one store, so {@code (env,
+   * application, key)} is what has one current value — the unique constraint above says so, and
+   * every read and every write on this table names an env. What was implicit in a per-tier
+   * deployment is explicit in the row.
+   */
+  @Column(nullable = false, length = 64)
+  public String env;
 
   /** The application this entry configures, dns-label-shaped. */
   @Column(nullable = false, length = 64)

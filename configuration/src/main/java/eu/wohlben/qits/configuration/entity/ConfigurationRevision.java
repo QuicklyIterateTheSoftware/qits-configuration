@@ -33,6 +33,19 @@ public class ConfigurationRevision extends PanacheEntityBase {
   @GeneratedValue(strategy = GenerationType.IDENTITY)
   public Long seq;
 
+  /**
+   * The environment this write happened in. See {@link ConfigurationEntry#env}: an entry is {@code
+   * (env, application, key)}, so a revision that did not say which env it changed would describe a
+   * write nobody could locate.
+   *
+   * <p>The seq itself stays GLOBAL rather than per-env, and that is deliberate. It is an identity
+   * column, so it is one counter for the table; a per-env sequence would be a second thing to keep
+   * correct and would buy nothing, because a head revision is only ever compared against another
+   * head revision of the same {@code (env, application)}.
+   */
+  @Column(nullable = false, length = 64)
+  public String env;
+
   @Column(nullable = false, length = 64)
   public String application;
 

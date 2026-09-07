@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.configuration.control.ConfigurationService;
+import eu.wohlben.qits.configuration.control.InstanceEnv;
 import eu.wohlben.qits.configuration.entity.ConfigurationEntry;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import java.time.Instant;
@@ -18,11 +19,21 @@ import org.junit.jupiter.api.Test;
  * stands in for the write seam and records what {@link SoftwareReleaseListener#onFrame} asks of it,
  * so the test is about the match rule alone — a {@code @QuarkusTest} would prove the same thing
  * behind a Quarkus boot it does not need.
+ *
+ * <p><b>The env is asserted on every write</b>, and it is {@link #LEGACY_ENV}. A release says an
+ * image version exists and nothing about which tiers should run it, so the pin goes where it went
+ * before this service moved onto the platform plane — this instance's legacy env, handed to the
+ * listener as a fixed {@link InstanceEnv} because a plain JUnit test has no container to inject one.
+ * A later wave gives the listener a policy; until then "which env" is a constant and is pinned here
+ * so that a generalisation cannot happen silently.
  */
 class SoftwareReleaseListenerTest {
 
+  /** The env every pin lands in for now — see the class javadoc. */
+  private static final String LEGACY_ENV = "test";
+
   /** One {@code upsert} as the seam received it. */
-  private record Write(String application, String key, String value, String actor) {}
+  private record Write(String env, String application, String key, String value, String actor) {}
 
   /**
    * A {@link ConfigurationService} that writes nothing and remembers every call it was handed.
@@ -34,8 +45,9 @@ class SoftwareReleaseListenerTest {
     final List<Write> writes = new ArrayList<>();
 
     @Override
-    public ConfigurationEntry upsert(String application, String key, String value, String actor) {
-      writes.add(new Write(application, key, value, actor));
+    public ConfigurationEntry upsert(
+        String env, String application, String key, String value, String actor) {
+      writes.add(new Write(env, application, key, value, actor));
       ConfigurationEntry entry = new ConfigurationEntry();
       entry.headRevision = 1;
       return entry;
@@ -69,6 +81,7 @@ class SoftwareReleaseListenerTest {
   private SoftwareReleaseListener listenerWith(CapturingService service) {
     SoftwareReleaseListener listener = new SoftwareReleaseListener();
     listener.configuration = service;
+    listener.instanceEnv = InstanceEnv.fixed(LEGACY_ENV);
     return listener;
   }
 
@@ -82,6 +95,7 @@ class SoftwareReleaseListenerTest {
     listener.onFrame(frame);
 
     Write write = service.only();
+    assertEquals(LEGACY_ENV, write.env(), "the pin lands in this instance's legacy env");
     assertEquals("qits-projects", write.application());
     assertEquals("env.QITS_PROJECTS_AGENT_IMAGE_VERSION", write.key());
     assertEquals("2026.822.101500", write.value());
@@ -108,6 +122,7 @@ class SoftwareReleaseListenerTest {
 
     Write workspaces = service.on("qits-workspaces");
     assertNotNull(workspaces, "the application that starts a workspace must be pinned");
+    assertEquals(LEGACY_ENV, workspaces.env());
     assertEquals("env.QITS_WORKSPACE_IMAGE_VERSION", workspaces.key());
     assertEquals("2026.822.101500", workspaces.value());
     assertEquals("qits-configuration/software-release-listener", workspaces.actor());
@@ -116,6 +131,7 @@ class SoftwareReleaseListenerTest {
     assertNotNull(projects, "the application that starts a refinement container must be pinned too");
     // The env override of qits.projects.refinement-image-version, which
     // refinementhost/RefinementContainerFactory reads to compose the image it starts.
+    assertEquals(LEGACY_ENV, projects.env());
     assertEquals("env.QITS_PROJECTS_REFINEMENT_IMAGE_VERSION", projects.key());
     assertEquals("2026.822.101500", projects.value());
     assertEquals("qits-configuration/software-release-listener", projects.actor());
@@ -137,6 +153,7 @@ class SoftwareReleaseListenerTest {
     listener.onFrame(frame);
 
     Write write = service.only();
+    assertEquals(LEGACY_ENV, write.env(), "the pin lands in this instance's legacy env");
     assertEquals("qits-workspaces", write.application());
     assertEquals("env.QITS_EDITOR_IMAGE_VERSION", write.key());
     assertEquals("2026.822.101500", write.value());

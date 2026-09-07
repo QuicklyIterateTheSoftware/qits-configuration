@@ -1,6 +1,7 @@
 package eu.wohlben.qits.configuration.api;
 
 import eu.wohlben.qits.configuration.control.ConfigurationService;
+import eu.wohlben.qits.configuration.control.InstanceEnv;
 import eu.wohlben.qits.configuration.dto.ApplicationSummaryDto;
 import eu.wohlben.qits.configuration.dto.ConfigurationEntryDto;
 import eu.wohlben.qits.configuration.dto.ConfigurationRevisionDto;
@@ -23,10 +24,17 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 
 /**
- * Deployment configuration, by application.
+ * Deployment configuration, by application and environment.
  *
  * <p>Served under {@code /configuration/api/applications} — the {@code /configuration/api} prefix is
  * {@code quarkus.rest.path}, not spelled here, so this class carries only its own noun.
+ *
+ * <p><b>THE ENV IS A PATH SEGMENT.</b> This service runs on the platform plane and holds every
+ * environment's configuration in one store, so the address of a value is {@code
+ * /applications/<application>/envs/<env>/...}. That is the whole promotion, expressed where a caller
+ * cannot miss it: an edit names the env it edits, and a read names the env it reads. The old
+ * env-less spellings are still here, delegating to this instance's legacy env, and every one of them
+ * says so in its own javadoc and is removed in the cutover feature.
  *
  * <p><b>Every route accepts the same pair of roles</b>, {@code qits:admin} (a person, through the
  * gateway's forward-auth headers) and {@code qits:system} (a machine, through a bearer validated
@@ -36,7 +44,10 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * {@code MachineAuth.require()}. There is no anonymous route here.
  *
  * <p>Request and response shapes are nested records, the platform's controller idiom: the wire
- * contract for one operation lives beside the method that serves it.
+ * contract for one operation lives beside the method that serves it. <b>The env-addressed routes
+ * reuse the legacy routes' response records rather than growing parallel ones</b> — the shapes
+ * already carry {@code env}, so there is nothing for a second set to say, and a second set would be
+ * the thing left behind when the first is deleted.
  */
 @Path("/applications")
 @Produces(MediaType.APPLICATION_JSON)
@@ -46,6 +57,8 @@ public class ConfigurationController {
   @Inject ConfigurationService configuration;
 
   @Inject ConfigurationMapper mapper;
+
+  @Inject InstanceEnv instanceEnv;
 
   @Inject SecurityIdentity identity;
 
@@ -61,71 +74,189 @@ public class ConfigurationController {
   }
 
   /**
-   * Every application this service holds configuration for, with its entry count and how far its
-   * history has run.
+   * Every application this service holds configuration for, with one row per environment it is
+   * configured in — that environment's entry count and how far its history has run.
    *
-   * <p>An application whose entries have all been deleted is still listed, at zero entries: "where
-   * did my configuration go" is the question this listing most needs to be able to answer.
+   * <p><b>It aggregates across envs rather than taking one</b>, because on a platform instance the
+   * useful shape of this question is comparative: which tiers is this application configured in, and
+   * do they look alike. A per-env listing would answer a question the entries route already answers
+   * better.
+   *
+   * <p>An application whose entries have all been deleted is still listed, at zero entries in the
+   * env it was deleted from: "where did my configuration go" is the question this listing most needs
+   * to be able to answer.
    */
   @GET
-  @Operation(summary = "Every configured application, with entry counts and head revisions")
+  @Operation(summary = "Every configured application, with per-environment counts and revisions")
   @APIResponse(responseCode = "200", description = "The applications")
   @RolesAllowed({"qits:admin", "qits:system"})
   public ListApplicationsResponse applications() {
     return new ListApplicationsResponse(configuration.applications());
   }
 
+  // ------------------------------------------------------------ env-addressed
+
   /**
-   * THE DEPLOYER'S READ: one application's configuration as a flat property map, at the full
-   * prefixed spelling {@code qits.platform.deployments.extras.<app>.<key>}.
+   * THE DEPLOYER'S READ: one application's configuration in one environment, as a flat property map,
+   * at the full prefixed spelling {@code qits.platform.deployments.extras.<app>.<key>}.
    *
    * <p>The names are complete on purpose — a consumer layers this map as a configuration source
    * verbatim, with no prefix to re-assemble and no second place for the deployer's namespace to be
-   * written down.
+   * written down. <b>They carry no env</b>: the container being configured is in exactly one, the one
+   * named in this path, so an env inside the property names would be a segment every consumer had to
+   * strip.
    *
    * <p>{@code headRevision} is what the caller records to say which configuration it deployed with.
-   * It comes from the append-only log, so it moves forward on a delete as well as on a write.
+   * It comes from the append-only log and is scoped to this env, so it moves forward on a delete as
+   * well as on a write, and a write in another environment does not move it at all.
    *
    * <p>An application with nothing stored is an empty map at revision 0, never a 404: a deployer
    * that read a 404 as an error would refuse every deployment of an application nobody has
-   * configured.
+   * configured. The same holds for an env nobody has written into yet.
    */
   @GET
-  @Path("/{application}/resolved")
-  @Operation(summary = "One application's configuration as a flat, fully prefixed property map")
+  @Path("/{application}/envs/{env}/resolved")
+  @Operation(summary = "One application's configuration in one environment, fully prefixed")
   @APIResponse(responseCode = "200", description = "The resolved properties and the head revision")
-  @APIResponse(responseCode = "400", description = "The application name is not valid")
+  @APIResponse(responseCode = "400", description = "The environment or application name is invalid")
   @RolesAllowed({"qits:admin", "qits:system"})
-  public ResolvedConfigurationDto resolved(@PathParam("application") String application) {
-    return configuration.resolve(application);
+  public ResolvedConfigurationDto resolvedIn(
+      @PathParam("application") String application, @PathParam("env") String env) {
+    return configuration.resolve(env, application);
   }
 
-  /** One application's current entries, by key. */
+  /** One application's current entries in one environment, by key. */
   @GET
-  @Path("/{application}/entries")
-  @Operation(summary = "One application's current entries")
+  @Path("/{application}/envs/{env}/entries")
+  @Operation(summary = "One application's current entries in one environment")
   @APIResponse(responseCode = "200", description = "The entries")
-  @APIResponse(responseCode = "400", description = "The application name is not valid")
+  @APIResponse(responseCode = "400", description = "The environment or application name is invalid")
   @RolesAllowed({"qits:admin", "qits:system"})
-  public ListEntriesResponse entries(@PathParam("application") String application) {
+  public ListEntriesResponse entriesIn(
+      @PathParam("application") String application, @PathParam("env") String env) {
     return new ListEntriesResponse(
-        configuration.entriesOf(application).stream().map(mapper::toDto).toList());
+        configuration.entriesOf(env, application).stream().map(mapper::toDto).toList());
   }
 
   /**
-   * Set one entry's value.
+   * Set one entry's value in one environment.
    *
-   * <p>201 the first time a key is seen, 200 afterwards. <b>An identical value writes no
-   * revision</b> and answers 200 with the entry unchanged — which is what makes a re-run of a
-   * seeding script free, and what keeps the history a record of changes rather than of runs.
+   * <p>201 the first time a key is seen IN THAT ENV, 200 afterwards — the same key in another
+   * environment is another entry and is created on its own. <b>An identical value writes no
+   * revision</b> and answers 200 with the entry unchanged, which is what makes a re-run of a seeding
+   * script free and what keeps the history a record of changes rather than of runs.
    *
    * <p>The key is the extras grammar after the application segment. Its SHAPE is checked here; what
    * the value means is not this service's question — qits-platform-deployments' {@code
    * ServiceExtras} stays the single parser of a mount, a publish or an alias.
    */
   @PUT
+  @Path("/{application}/envs/{env}/entries/{key}")
+  @Operation(summary = "Set one entry's value in one environment")
+  @APIResponse(responseCode = "200", description = "The entry, already present")
+  @APIResponse(responseCode = "201", description = "The entry, newly created")
+  @APIResponse(responseCode = "400", description = "The env, application, key or value is invalid")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public Response setIn(
+      @PathParam("application") String application,
+      @PathParam("env") String env,
+      @PathParam("key") String key,
+      SetEntryRequest request) {
+    return write(env, application, key, request);
+  }
+
+  /**
+   * Remove one entry from one environment.
+   *
+   * <p>The value is not lost: a deleted revision is appended and the history keeps what was removed,
+   * which is what makes an accidental delete answerable rather than merely regrettable. Nothing in
+   * another environment is touched.
+   */
+  @DELETE
+  @Path("/{application}/envs/{env}/entries/{key}")
+  @Operation(summary = "Remove one entry from one environment, keeping it in the history")
+  @APIResponse(responseCode = "204", description = "Removed")
+  @APIResponse(responseCode = "400", description = "The env, application or key is not valid")
+  @APIResponse(responseCode = "404", description = "No such entry in that environment")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public Response removeIn(
+      @PathParam("application") String application,
+      @PathParam("env") String env,
+      @PathParam("key") String key) {
+    configuration.delete(env, application, key, actor());
+    return Response.noContent().build();
+  }
+
+  /**
+   * One application's whole history in one environment, newest first. Deletions are in it, with a
+   * null value.
+   *
+   * <p>The {@code seq} numbers are global to the log, so a gap between two rows here is another
+   * environment's write and not a missing one.
+   */
+  @GET
+  @Path("/{application}/envs/{env}/history")
+  @Operation(summary = "One application's write history in one environment, newest first")
+  @APIResponse(responseCode = "200", description = "The revisions")
+  @APIResponse(responseCode = "400", description = "The environment or application name is invalid")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public ListHistoryResponse historyIn(
+      @PathParam("application") String application, @PathParam("env") String env) {
+    return new ListHistoryResponse(
+        configuration.history(env, application).stream().map(mapper::toDto).toList());
+  }
+
+  // ------------------------------------------------------------ transitional
+
+  /**
+   * The env-less resolved read.
+   *
+   * <p><b>TRANSITIONAL.</b> It answers for {@link InstanceEnv#legacyEnv()} — the env this instance's
+   * inherited rows were backfilled with — so a caller written against the environment-plane service
+   * keeps reading the rows it always read across the flip to the platform plane. The deployer is the
+   * caller that matters here, and a deployment failing because this service moved plane would be a
+   * platform-wide outage for a refactoring.
+   *
+   * <p>It is REMOVED in the cutover feature, once every caller addresses an env. Nothing new should
+   * be written against it.
+   */
+  @GET
+  @Path("/{application}/resolved")
+  @Operation(summary = "Deprecated: the resolved read against this instance's legacy environment")
+  @APIResponse(responseCode = "200", description = "The resolved properties and the head revision")
+  @APIResponse(responseCode = "400", description = "The application name is not valid")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public ResolvedConfigurationDto resolved(@PathParam("application") String application) {
+    return configuration.resolve(instanceEnv.legacyEnv(), application);
+  }
+
+  /**
+   * The env-less entries listing.
+   *
+   * <p><b>TRANSITIONAL</b>, answering for {@link InstanceEnv#legacyEnv()}; see {@link
+   * #resolved(String)}. Removed in the cutover feature.
+   */
+  @GET
+  @Path("/{application}/entries")
+  @Operation(summary = "Deprecated: the entries of this instance's legacy environment")
+  @APIResponse(responseCode = "200", description = "The entries")
+  @APIResponse(responseCode = "400", description = "The application name is not valid")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public ListEntriesResponse entries(@PathParam("application") String application) {
+    return entriesIn(application, instanceEnv.legacyEnv());
+  }
+
+  /**
+   * The env-less write.
+   *
+   * <p><b>TRANSITIONAL</b>, writing into {@link InstanceEnv#legacyEnv()}; see {@link
+   * #resolved(String)}. It is the one transitional route that MUTATES, and the reason it is kept is
+   * the bootstrap: a seeding script that has not learned the env segment yet would otherwise write
+   * nowhere at all and report success. Removed in the cutover feature.
+   */
+  @PUT
   @Path("/{application}/entries/{key}")
-  @Operation(summary = "Set one entry's value")
+  @Operation(summary = "Deprecated: set an entry in this instance's legacy environment")
   @APIResponse(responseCode = "200", description = "The entry, already present")
   @APIResponse(responseCode = "201", description = "The entry, newly created")
   @APIResponse(responseCode = "400", description = "The application, key or value is not valid")
@@ -134,58 +265,74 @@ public class ConfigurationController {
       @PathParam("application") String application,
       @PathParam("key") String key,
       SetEntryRequest request) {
-    boolean existed = exists(application, key);
-    ConfigurationEntryDto entry =
-        mapper.toDto(
-            configuration.upsert(
-                application, key, request == null ? null : request.value(), actor()));
-    return Response.status(existed ? Response.Status.OK : Response.Status.CREATED)
-        .entity(new SetEntryRequest.Response(entry))
-        .build();
+    return write(instanceEnv.legacyEnv(), application, key, request);
   }
 
   /**
-   * Remove one entry.
+   * The env-less delete.
    *
-   * <p>The value is not lost: a deleted revision is appended and the history keeps what was removed,
-   * which is what makes an accidental delete answerable rather than merely regrettable.
+   * <p><b>TRANSITIONAL</b>, removing from {@link InstanceEnv#legacyEnv()}; see {@link
+   * #resolved(String)}. Removed in the cutover feature.
    */
   @DELETE
   @Path("/{application}/entries/{key}")
-  @Operation(summary = "Remove one entry, keeping it in the history")
+  @Operation(summary = "Deprecated: remove an entry from this instance's legacy environment")
   @APIResponse(responseCode = "204", description = "Removed")
   @APIResponse(responseCode = "400", description = "The application or key is not valid")
   @APIResponse(responseCode = "404", description = "No such entry")
   @RolesAllowed({"qits:admin", "qits:system"})
   public Response remove(
       @PathParam("application") String application, @PathParam("key") String key) {
-    configuration.delete(application, key, actor());
+    configuration.delete(instanceEnv.legacyEnv(), application, key, actor());
     return Response.noContent().build();
   }
 
-  /** One application's whole history, newest first. Deletions are in it, with a null value. */
+  /**
+   * The env-less history.
+   *
+   * <p><b>TRANSITIONAL</b>, reading {@link InstanceEnv#legacyEnv()}; see {@link #resolved(String)}.
+   * Removed in the cutover feature.
+   */
   @GET
   @Path("/{application}/history")
-  @Operation(summary = "One application's write history, newest first")
+  @Operation(summary = "Deprecated: the history of this instance's legacy environment")
   @APIResponse(responseCode = "200", description = "The revisions")
   @APIResponse(responseCode = "400", description = "The application name is not valid")
   @RolesAllowed({"qits:admin", "qits:system"})
   public ListHistoryResponse history(@PathParam("application") String application) {
-    return new ListHistoryResponse(
-        configuration.history(application).stream().map(mapper::toDto).toList());
+    return historyIn(application, instanceEnv.legacyEnv());
+  }
+
+  // ------------------------------------------------------------ internals
+
+  /**
+   * The write both PUT routes perform, so the 201/200 rule is decided in one place. A transitional
+   * route that answered a different status than its env-addressed twin would be a difference nobody
+   * meant and the suite would have to assert twice.
+   */
+  private Response write(String env, String application, String key, SetEntryRequest request) {
+    boolean existed = exists(env, application, key);
+    ConfigurationEntryDto entry =
+        mapper.toDto(
+            configuration.upsert(
+                env, application, key, request == null ? null : request.value(), actor()));
+    return Response.status(existed ? Response.Status.OK : Response.Status.CREATED)
+        .entity(new SetEntryRequest.Response(entry))
+        .build();
   }
 
   /**
-   * Whether the key is already there, asked before the write so the answer can be 201 or 200.
+   * Whether the key is already there IN THAT ENV, asked before the write so the answer can be 201 or
+   * 200.
    *
    * <p>It is a second read rather than a flag out of the service, and that is deliberate: the write
    * seam's job is to keep the revision and the head in step, and returning "did I create it" would
    * make the created/updated distinction part of a contract that has no other use for it. A racing
    * pair of first writes answers 201 twice, which costs a caller nothing.
    */
-  private boolean exists(String application, String key) {
+  private boolean exists(String env, String application, String key) {
     try {
-      configuration.require(application, key);
+      configuration.require(env, application, key);
       return true;
     } catch (eu.wohlben.qits.configuration.error.NotFoundException absent) {
       return false;

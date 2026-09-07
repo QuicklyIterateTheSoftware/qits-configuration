@@ -7,9 +7,15 @@ import java.time.Instant;
  *
  * <p>{@code value} is null exactly when {@code deleted} is true. The pair is deliberate: an entry
  * may hold the empty string, so a null value alone could not tell a deletion from a blanking.
+ *
+ * <p>{@code seq} is global to the log rather than per-env, so two revisions of different
+ * environments interleave in it. That is a property of the counter and not of the history: what is
+ * comparable is two seqs of the same {@code (env, application)}, and {@code env} is on the wire so
+ * nobody has to guess which.
  */
 public record ConfigurationRevisionDto(
     long seq,
+    String env,
     String application,
     String key,
     String value,

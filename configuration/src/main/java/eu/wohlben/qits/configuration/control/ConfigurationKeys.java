@@ -4,8 +4,8 @@ import eu.wohlben.qits.configuration.error.BadRequestException;
 import java.util.regex.Pattern;
 
 /**
- * What an application name and an entry key may look like. Untrusted input, checked where it is
- * stored.
+ * What an env name, an application name and an entry key may look like. Untrusted input, checked
+ * where it is stored.
  *
  * <p><b>The line this class draws is the whole boundary of this service.</b> It validates the SHAPE
  * of a key and nothing about the value beside it: a mount specification, a published port, a group
@@ -31,6 +31,17 @@ public final class ConfigurationKeys {
    */
   private static final Pattern APPLICATION = Pattern.compile("^[a-z]([a-z0-9-]{0,62}[a-z0-9])?$");
 
+  /**
+   * An environment name, held to the SAME discipline as an application name and by the same pattern
+   * — {@code dev}, {@code prod}, {@code review-1234}.
+   *
+   * <p>One charset rather than a looser one of its own, because an env is now a path segment on this
+   * API and a column that leads a unique constraint. Two spellings that differ only in case would be
+   * two environments in the store and one environment to a person, which is the kind of ambiguity a
+   * configuration service is the worst place to have.
+   */
+  private static final Pattern ENV = APPLICATION;
+
   /** {@code env.<VAR>} — an environment variable, in the charset a shell will accept as a name. */
   private static final Pattern ENV_KEY = Pattern.compile("^env\\.[A-Za-z_][A-Za-z0-9_]*$");
 
@@ -43,9 +54,30 @@ public final class ConfigurationKeys {
       Pattern.compile("^(mounts|publishes|groups|aliases)\\[[0-9]{1,4}]$");
 
   private static final int APPLICATION_MAX = 64;
+  private static final int ENV_MAX = 64;
   private static final int KEY_MAX = 256;
 
   private ConfigurationKeys() {}
+
+  /** The env name, or a 400 naming the grammar it missed. */
+  public static String requireEnv(String env) {
+    if (env == null || env.isBlank()) {
+      throw new BadRequestException("An environment name is required");
+    }
+    String trimmed = env.trim();
+    if (trimmed.length() > ENV_MAX) {
+      throw new BadRequestException(
+          "The environment name is longer than " + ENV_MAX + " characters: " + trimmed);
+    }
+    if (!ENV.matcher(trimmed).matches()) {
+      throw new BadRequestException(
+          "Not a valid environment name: "
+              + trimmed
+              + ". It must be lower case, start with a letter, end with a letter or a digit, and"
+              + " hold only letters, digits and dashes in between.");
+    }
+    return trimmed;
+  }
 
   /** The application name, or a 400 naming what is wrong with it. */
   public static String requireApplication(String application) {

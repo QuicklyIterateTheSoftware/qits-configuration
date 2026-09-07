@@ -1,6 +1,8 @@
 package eu.wohlben.qits.configuration.api;
 
+import eu.wohlben.qits.configuration.control.ConfigurationKeys;
 import eu.wohlben.qits.configuration.control.ConfigurationService;
+import eu.wohlben.qits.configuration.control.InstanceEnv;
 import eu.wohlben.qits.configuration.dto.ImportSummaryDto;
 import io.quarkus.security.identity.SecurityIdentity;
 import jakarta.annotation.security.RolesAllowed;
@@ -9,6 +11,7 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
@@ -31,6 +34,15 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * behind — a half-applied import would be worse than a failed one, because the operator would have
  * to work out which half.
  *
+ * <p><b>THE IMPORT NAMES THE ENV IT ASSERTS</b>, as {@code ?env=<env>}. The file cannot: its grammar
+ * is {@code extras.<application>.<key>} and there is nowhere in it for a tier, because it was always
+ * one environment's config volume. So the assertion is the caller's and it covers the whole file —
+ * one env per import, which is also what makes the single transaction below mean something.
+ *
+ * <p>It is a QUERY PARAMETER rather than a path segment because this route carries its application
+ * segments in the body and always has; a {@code /import/envs/<env>} would put one of the file's three
+ * coordinates in the path and leave the other two in the payload.
+ *
  * <p>It sits at {@code /configuration/api/import} rather than under {@code /applications} because it
  * carries its own application segments: the file names them, one per line.
  */
@@ -40,18 +52,34 @@ public class ImportController {
 
   @Inject ConfigurationService configuration;
 
+  @Inject InstanceEnv instanceEnv;
+
   @Inject SecurityIdentity identity;
 
+  /**
+   * @param env the environment the whole file describes. <b>Absent is TRANSITIONAL</b> and means
+   *     this instance's legacy env — the one V2's backfill stamped into the rows it inherited — so a
+   *     bootstrap that has not learned the parameter yet keeps seeding the environment it always
+   *     seeded across the flip to the platform plane. The default goes away with the env-less routes
+   *     in the cutover feature, and an import that does not say which environment it is asserting
+   *     will then be a 400 rather than a guess.
+   */
   @POST
   @Consumes(MediaType.TEXT_PLAIN)
-  @Operation(summary = "Import an extras properties file, idempotently")
+  @Operation(summary = "Import an extras properties file into one environment, idempotently")
   @APIResponse(responseCode = "200", description = "What the import did")
   @APIResponse(
       responseCode = "400",
-      description = "A line carries the extras prefix and a key or application this service refuses")
+      description =
+          "The env is not a valid name, or a line carries the extras prefix and a key or"
+              + " application this service refuses")
   @RolesAllowed({"qits:admin", "qits:system"})
-  public ImportSummaryDto importProperties(String body) {
-    return configuration.importProperties(body, actor());
+  public ImportSummaryDto importProperties(@QueryParam("env") String env, String body) {
+    String environment =
+        env == null || env.isBlank()
+            ? instanceEnv.legacyEnv()
+            : ConfigurationKeys.requireEnv(env);
+    return configuration.importProperties(environment, body, actor());
   }
 
   /** See the note on {@code ConfigurationController.actor()}: a null is "no name worth recording". */

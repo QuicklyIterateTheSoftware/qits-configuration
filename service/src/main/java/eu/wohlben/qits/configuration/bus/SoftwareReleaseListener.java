@@ -3,6 +3,7 @@ package eu.wohlben.qits.configuration.bus;
 import eu.wohlben.qits.configuration.control.ConfigurationService;
 import eu.wohlben.qits.configuration.control.ImagePins;
 import eu.wohlben.qits.configuration.control.ImagePins.Pin;
+import eu.wohlben.qits.configuration.control.InstanceEnv;
 import eu.wohlben.qits.configuration.entity.ConfigurationEntry;
 import eu.wohlben.qits.eventstream.QitsDurableEventListener;
 import eu.wohlben.qits.eventstream.control.CanonicalJson;
@@ -116,6 +117,18 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
 
   @Inject ConfigurationService configuration;
 
+  /**
+   * Which env the pin lands in — this instance's legacy env, and only that one for now.
+   *
+   * <p><b>A release is not env-shaped and a pin is.</b> {@code SoftwareRelease} says an image version
+   * exists; it says nothing about which tiers should start it, and that is a decision rather than a
+   * fact the event carries. Writing every env would promote a released image into prod the moment CI
+   * went green, which is the opposite of what a platform with tiers is for. So until there is a
+   * policy to express — a later wave's business — the pin goes where it went before the plane flip,
+   * and that is exactly what the legacy env names.
+   */
+  @Inject InstanceEnv instanceEnv;
+
   @Override
   public String consumerId() {
     return CONSUMER_ID;
@@ -159,12 +172,13 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
       // match; for a non-selecting frame the funnel never calls onFrame. Cheaper than an assertion.
       return;
     }
+    String env = instanceEnv.legacyEnv();
     for (Pin pin : matched.pins()) {
       ConfigurationEntry entry =
-          configuration.upsert(pin.application(), pin.key(), matched.version(), ACTOR);
+          configuration.upsert(env, pin.application(), pin.key(), matched.version(), ACTOR);
       LOG.infof(
-          "SoftwareRelease %s pinned %s=%s (application %s, revision %d)",
-          frame.id(), pin.key(), matched.version(), pin.application(), entry.headRevision);
+          "SoftwareRelease %s pinned %s=%s (env %s, application %s, revision %d)",
+          frame.id(), pin.key(), matched.version(), env, pin.application(), entry.headRevision);
     }
   }
 

@@ -1,5 +1,6 @@
 package eu.wohlben.qits.configuration.api;
 
+import eu.wohlben.qits.configuration.dto.ApplicationEnvSummaryDto;
 import eu.wohlben.qits.configuration.dto.ApplicationSummaryDto;
 import eu.wohlben.qits.configuration.dto.ConfigurationEntryDto;
 import eu.wohlben.qits.configuration.dto.ConfigurationRevisionDto;
@@ -30,6 +31,11 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       ConfigurationController.SetEntryRequest.Response.class,
       ImagePinsController.ListPinsResponse.class,
       ApplicationSummaryDto.class,
+      // NESTED INSIDE ApplicationSummaryDto AND STILL LISTED. The application listing is a record
+      // holding a list of these, and a type reached only through a generic type argument is exactly
+      // the kind the build-time analysis is least reliable about — the same class of failure the
+      // Response.entity() note above describes, one level deeper.
+      ApplicationEnvSummaryDto.class,
       ConfigurationEntryDto.class,
       ConfigurationRevisionDto.class,
       ResolvedConfigurationDto.class,
