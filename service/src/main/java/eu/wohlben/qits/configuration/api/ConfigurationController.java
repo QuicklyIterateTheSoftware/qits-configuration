@@ -17,9 +17,11 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
+import java.util.Optional;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 
@@ -113,19 +115,48 @@ public class ConfigurationController {
    * <p>An application with nothing stored is an empty map at revision 0, never a 404: a deployer
    * that read a 404 as an error would refuse every deployment of an application nobody has
    * configured. The same holds for an env nobody has written into yet.
+   *
+   * <p><b>{@code ?version=} is what turns this into the OVERLAY read.</b> Given one, the answer is
+   * that version's declaration merged underneath the stored entries: declared defaults for keys
+   * nobody has set, and {@code serviceAddress} keys rendered for THIS environment. Omitted, the
+   * answer is exactly what it has always been — entries and nothing else — which is not politeness
+   * but the rollout: the deployer reads this route once per deployment and does not pass a version
+   * yet, so requiring one would take the platform down for a feature nobody was using.
+   *
+   * <p>A version that names no declaration is a 404, unlike an application with no entries. The
+   * asymmetry is the point: absent means "not asking about declarations", present means "resolve me
+   * against this document", and answering the second with a bare entry map would hand back a
+   * configuration missing every default the caller asked for, with nothing to say so.
+   *
+   * @param version the declaration to overlay, or absent for the entries alone
    */
   @GET
   @Path("/{application}/envs/{env}/resolved")
   @Operation(summary = "One application's configuration in one environment, fully prefixed")
   @APIResponse(responseCode = "200", description = "The resolved properties and the head revision")
   @APIResponse(responseCode = "400", description = "The environment or application name is invalid")
+  @APIResponse(responseCode = "404", description = "The named declaration version does not exist")
+  @APIResponse(
+      responseCode = "422",
+      description = "A serviceAddress addresses an application that has not declared its plane")
   @RolesAllowed({"qits:admin", "qits:system"})
   public ResolvedConfigurationDto resolvedIn(
-      @PathParam("application") String application, @PathParam("env") String env) {
-    return configuration.resolve(env, application);
+      @PathParam("application") String application,
+      @PathParam("env") String env,
+      @QueryParam("version") String version) {
+    return configuration.resolve(env, application, Optional.ofNullable(version));
   }
 
-  /** One application's current entries in one environment, by key. */
+  /**
+   * One application's current entries in one environment, by key.
+   *
+   * <p><b>Each row carries {@code orphaned}</b>, decided against the application's governing
+   * declaration: true when that declaration does not account for the key, or declares it a
+   * serviceAddress whose stored value is ignored in favour of the rendered address. It is computed
+   * at read time and nothing is written or removed — an orphan is usually a key the next deployment
+   * drops and sometimes a key somebody set early for a version not released yet, and a store that
+   * tidied away the second kind would be a store nobody could stage a change in.
+   */
   @GET
   @Path("/{application}/envs/{env}/entries")
   @Operation(summary = "One application's current entries in one environment")
@@ -134,8 +165,7 @@ public class ConfigurationController {
   @RolesAllowed({"qits:admin", "qits:system"})
   public ListEntriesResponse entriesIn(
       @PathParam("application") String application, @PathParam("env") String env) {
-    return new ListEntriesResponse(
-        configuration.entriesOf(env, application).stream().map(mapper::toDto).toList());
+    return new ListEntriesResponse(configuration.entryViews(env, application));
   }
 
   /**
@@ -313,7 +343,7 @@ public class ConfigurationController {
   private Response write(String env, String application, String key, SetEntryRequest request) {
     boolean existed = exists(env, application, key);
     ConfigurationEntryDto entry =
-        mapper.toDto(
+        configuration.view(
             configuration.upsert(
                 env, application, key, request == null ? null : request.value(), actor()));
     return Response.status(existed ? Response.Status.OK : Response.Status.CREATED)

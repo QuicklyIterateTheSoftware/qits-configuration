@@ -43,17 +43,58 @@ A key is the extras grammar *after* the application segment:
 
 An application name is dns-label shaped. Anything else is a 400 that names what is wrong.
 
-**This service parses no values.** What a mount, a published port or an alias *means* is read by
-qits-platform-deployments' own `ServiceExtras`, which stays the single parser on the platform. The
+**This service parses no entry values.** What a mount, a published port or an alias *means* is read
+by qits-platform-deployments' own `ServiceExtras`, which stays the single parser on the platform. The
 key's shape is checked here because the deployer refuses a deployment carrying a key it does not
 recognise — checking at the write turns that into a 400 the person who typed it reads, instead of a
 failed deployment hours later.
+
+### Declarations, the one document this service does parse
+
+`.config/qits/configuration.yml` is where an application declares its **own** keys. It has a closed
+top level carrying a single `keys:` mapping, and each key names one of five types:
+
+    keys:
+      env.QITS_GREETING:      { type: string,  default: hello }     # also boolean, number
+      env.QITS_EVENTS_URL:    { type: serviceAddress, service: qits-events, port: 8080 }
+      env.QITS_IMAGE_VERSION: { type: packageVersion, package: { type: docker, name: qits/workspace } }
+
+`description:` is allowed on every key, kept in the stored document and given no field of its own.
+Everything else is refused, at every level, naming the document and the key.
+
+**Why the boundary moves for this one and not for entry values.** A declaration asks questions no
+application can answer about itself. A `serviceAddress` renders to a different host in every
+environment, and to a *differently shaped* host depending on which plane the named service deploys
+onto — bare `qits-events` on the platform plane, `<env>-qits-ci` on the environment plane, which is
+qits-platform-deployments' own `PdNetworks.alias`. The service that answers the resolved read is the
+only place both facts meet, so it is the one parser (`control/DeclarationParser`) and there must not
+be a second.
+
+**The plane comes with the seed, not out of the file.** `?deploymentTarget=platform|environment` is
+the deployer's fact — `deployment_target` in that application's own `.config/qits/deployments.yml` —
+and a document asserting its own would be a second answer that diverges the first time a service is
+promoted.
+
+**A version names one document.** The same bytes again is a 200 that appends nothing; different bytes
+under a taken version is a 409 naming both hashes. `DELETE` is the tag-recovery door for a re-cut
+build, and after it the previously-governing version governs again.
+
+**Precedence, lowest first: declared default → imported value → operator's value.** The last two are
+one stored row ordered at the *write*: the bulk import writes class `imported` and refuses to
+overwrite a `plain` row, reporting how many it `kept`. Without that, a bootstrap that re-imports on
+every boot would silently revert an operator's fix to a live environment. A `serviceAddress` key sits
+outside the ladder entirely — it is rendered on every read, a `PUT` on one is a 400, and a stored row
+on one is reported `orphaned`.
 
 ## The API
 
 Everything under `/configuration/api`. Every route accepts `qits:admin` (a person, through
 qits-gateway's forward-auth headers) or `qits:system` (a machine, through a bearer validated against
-qits-platform-idp). There is no anonymous route.
+qits-platform-idp) — **except the two declaration writes, which take `qits:system` alone and also
+call `MachineAuth.require()`**. That is not a claim that declarations are more dangerous than
+entries; it is that every other route records a *decision*, which a person may legitimately make,
+while a declaration records an *asserted fact about a build*, which only the pipeline that built it
+can honestly make. There is no anonymous route.
 
 | route | what it answers |
 | --- | --- |
@@ -63,8 +104,13 @@ qits-platform-idp). There is no anonymous route.
 | `PUT /applications/{app}/entries/{key}` | set one value. 201 the first time, 200 after; an identical value writes no revision |
 | `DELETE /applications/{app}/entries/{key}` | remove one entry, keeping it in the history |
 | `GET /applications/{app}/history` | every revision, newest first |
-| `POST /import` | `text/plain`, an extras properties file whole. Idempotent; answers `{imported, unchanged, ignored}` |
+| `POST /import` | `text/plain`, an extras properties file whole. Idempotent; answers `{imported, unchanged, kept, ignored}` |
 | `GET /pins` | the configured container-image versions — `{generatedAt, pins:[{image, version, application, key}]}` |
+| `GET /applications/{app}/envs/{env}/resolved?version=` | **the overlay read** — the same shape, with that version's declaration merged underneath: defaults for keys nobody set, `serviceAddress` keys rendered for *this* env. Without `?version=` it is exactly the entries, and never a 404 |
+| `POST /applications/{app}/declarations/{version}?deploymentTarget=` | `application/yaml`, the document raw. **`qits:system` + `MachineAuth`.** 201 new, 200 identical, 409 different-under-a-taken-version, 422 unreadable |
+| `DELETE /applications/{app}/declarations/{version}` | the tag-recovery door. **`qits:system` + `MachineAuth`.** 204; the previous version governs again |
+| `GET /applications/{app}/declarations` | every version declared, newest first, with the governing one flagged |
+| `GET /applications/{app}/declarations/{version}` | one declaration: the parsed keys **and** the document verbatim |
 
 The resolved read carries **complete property names** on purpose: a consumer layers the map as a
 configuration source verbatim, with no prefix to re-assemble and no second place for the deployer's

@@ -60,6 +60,22 @@
             <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
         <dependency>
+            <!-- THE SECOND DOCUMENT CLASS THIS CONTEXT READS. Entry VALUES stay unparsed — that line
+                 is the whole boundary and it holds — but a DECLARATION (`.config/qits/configuration.yml`)
+                 is a document this service has to understand in order to serve a typed read at all,
+                 and control/DeclarationParser is the estate's one strict parser of it.
+
+                 No <version>: the Quarkus BOM manages snakeyaml, so this tracks the platform instead
+                 of pinning a second opinion about which snakeyaml the process runs.
+
+                 Parsed through `new Yaml(new SafeConstructor(new LoaderOptions()))`, which yields
+                 plain maps, lists and scalars and constructs no arbitrary class — so nothing needs
+                 native-image reflection registration and no document can name a type into existence.
+                 qits-projects' QitsConfigParser is the precedent, same constructor. -->
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
         </dependency>

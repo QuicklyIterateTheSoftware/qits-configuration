@@ -34,13 +34,29 @@ back to a container build, so recognise the fallback by the image pull.
 which is what `api/ApiWireReflection` exists for. A new response type joins that list in the commit
 that adds it; the failure is a 500 in the native binary while every JVM test stays green.
 
-## This service stores; it does not parse
+## This service stores entry values; it does not parse them
 
 The line is the whole boundary. `ConfigurationKeys` validates the SHAPE of an application name and
-of a key. **Nothing here reads a value.** What a mount, a published port, a group or an alias means
-is qits-platform-deployments' `ServiceExtras`, which stays the single parser on the platform — a
-second one would be a second opinion about what a deployment means, and it would be the copy no real
-deployment exercises.
+of a key. **Nothing here reads an entry value.** What a mount, a published port, a group or an alias
+means is qits-platform-deployments' `ServiceExtras`, which stays the single parser on the platform —
+a second one would be a second opinion about what a deployment means, and it would be the copy no
+real deployment exercises.
+
+**The one document it does parse, and why the line survives it.** `.config/qits/configuration.yml` is
+a SECOND document class: the application's declaration of its own keys, their types and their
+defaults. `control/DeclarationParser` is the estate's one strict parser of it, and it has to live
+here for exactly the reason `ServiceExtras` lives over there — whoever serves the typed read is the
+only place the facts meet. A `serviceAddress` renders to a different host in every environment, and
+to a differently *shaped* host depending on which plane the addressed application deploys onto (bare
+alias on the platform plane, `<env>-<application>` on the environment plane, which is
+`PdNetworks.alias`); no application knows either fact about itself. The plane is not in the document
+— it arrives with the seed as `?deploymentTarget=`, because it is the deployer's `deployment_target`
+and a file asserting its own would diverge the first time a service is promoted.
+
+The parser is closed at every level (top level, per-type attribute sets, the type vocabulary, and
+duplicate keys) and every refusal names the document and the key. That strictness is the same
+argument the key grammar makes one document up: a silently ignored `path:` is an address nobody
+meant, and the container boots, passes its gate and dials the wrong port.
 
 The key grammar is checked at the write because the deployer **refuses** a deployment carrying a key
 it does not recognise, by design: a dropped flag is a container that boots, passes its gate and has
@@ -101,11 +117,28 @@ qits-gateway performed the login and asserted `X-Qits-User` / `X-Qits-Roles`, wh
 `ForwardAuthMechanism` reads. A request WITH a bearer is MACHINE traffic, validated by quarkus-oidc
 against qits-platform-idp.
 
-**Both land as roles, which is why every route is `@RolesAllowed({"qits:admin", "qits:system"})` and
-none of them calls `MachineAuth.require()`.** The reads are pulled by the deployer once per
-deployment *and* read by an operator; the writes are made by an operator *and* by the bootstrap's
-import. A machine-only guard on either side would lock the other one out. There is no anonymous
-route here and there must never be one.
+**Both land as roles, which is why nearly every route is `@RolesAllowed({"qits:admin",
+"qits:system"})` and does not call `MachineAuth.require()`.** The reads are pulled by the deployer
+once per deployment *and* read by an operator; the writes are made by an operator *and* by the
+bootstrap's import. A machine-only guard on either side would lock the other one out. There is no
+anonymous route here and there must never be one.
+
+**The exception is `api/DeclarationsController`'s POST and DELETE**, which take `qits:system` alone
+AND call `machineAuth.require()` — the injected bean, an instance method, the shape
+qits-platform-deployments' `PdServiceController` established. The distinction is not that a
+declaration is more dangerous than an entry; an entry is what a container's environment is read from
+and nothing here beats that. It is that every other route records a DECISION, which a person and a
+machine may both legitimately make, while a declaration records an ASSERTED FACT about a build. A
+hand-posted one would enter the record as a fact no build produced, under a version that means
+something else in the registry, and every later resolved read would be answered against it — the
+pipeline of record bypassed. The reads keep the pair, because "what does this version declare" is the
+first question of any argument about a deployment and it changes nothing.
+
+The guard follows the `qits.auth.machine.required` gate and the annotation does not, so the two fail
+independently and a gate-off clone still tests green. Which also means **no `@QuarkusTest` can
+observe either refusal** — the `%test` dev user holds `qits:system` and the gate is off — so
+`DeclarationsApiTest` asserts only that the doors ADMIT what they should, and refusals stay under
+`stories/refusals` against the launched artifact.
 
 `quarkus.oidc.tenant-enabled=${qits.auth.machine.required:false}` — validation follows the rollout
 gate rather than standing on its own, so with the gate off there is no OIDC tenant, nothing fetches
@@ -128,14 +161,25 @@ halfway.
 Write inserts in such tests with **named columns**. A positional one makes every later migration a
 change to a test that had nothing to do with it.
 
-**Three Java fields do not match their columns**, and that is deliberate: `entryKey`, `entryValue`
-and `entryClass` are stored as `key`, `value` and `class`. `KEY` and `VALUE` are reserved in HQL and
-`class` is a Java keyword; all three are legal unquoted column names in PostgreSQL. Renaming the
-columns to match instead would have put the mismatch where a person reads SQL by hand.
+**Five Java fields do not match their columns**, and that is deliberate: `entryKey`, `entryValue`
+and `entryClass` are stored as `key`, `value` and `class`, and on `ConfigurationDeclaredKey`
+`declaredKey` and `declaredType` are stored as `key` and `type`. `KEY`, `VALUE` and `TYPE` are taken
+in HQL (the map-entry and polymorphic-type functions) and `class` is a Java keyword; all of them are
+legal unquoted column names in PostgreSQL. Renaming the columns to match instead would have put the
+mismatch where a person reads SQL by hand.
 
 **No check constraint on `class`**, so the vocabulary can grow without a migration and every
-historical row keeps the word it was written with. `plain` is the only word v1 writes; `secret` is
-the qits-secrets fold-in and arrives with code that can hold one.
+historical row keeps the word it was written with. It holds two words now: `plain` is the OPERATOR's
+— a value somebody set through the API — and `imported` is the bulk import's. That pair is not
+cosmetic, it is the precedence: the import writes `imported`, refuses to overwrite a `plain` row, and
+counts what it `kept`, because the bootstrap re-imports on every boot and would otherwise silently
+revert an operator's fix to a live environment. Rows written before the word existed are all `plain`,
+which reads as "an operator set it" and protects them — the conservative direction to be wrong in.
+`secret` is still the qits-secrets fold-in and arrives with code that can hold one.
+
+**No check constraint on `deployment_target` either**, same reasoning, and it is NOT NULL with no
+default: it decides whether a peer's `serviceAddress` renders bare or env-prefixed, and a default
+would be a wire alias nobody chose.
 
 ## Adding a dependency on another context
 

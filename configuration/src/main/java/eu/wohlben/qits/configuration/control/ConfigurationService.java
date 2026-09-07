@@ -2,14 +2,22 @@ package eu.wohlben.qits.configuration.control;
 
 import eu.wohlben.qits.configuration.dto.ApplicationEnvSummaryDto;
 import eu.wohlben.qits.configuration.dto.ApplicationSummaryDto;
+import eu.wohlben.qits.configuration.dto.ConfigurationEntryDto;
 import eu.wohlben.qits.configuration.dto.ImagePinDto;
 import eu.wohlben.qits.configuration.dto.ImportSummaryDto;
 import eu.wohlben.qits.configuration.dto.ResolvedConfigurationDto;
+import eu.wohlben.qits.configuration.entity.ConfigurationDeclaration;
+import eu.wohlben.qits.configuration.entity.ConfigurationDeclaredKey;
 import eu.wohlben.qits.configuration.entity.ConfigurationEntry;
 import eu.wohlben.qits.configuration.entity.ConfigurationRevision;
+import eu.wohlben.qits.configuration.error.BadRequestException;
 import eu.wohlben.qits.configuration.error.NotFoundException;
+import eu.wohlben.qits.configuration.error.UnprocessableEntityException;
+import eu.wohlben.qits.configuration.mapper.ConfigurationMapper;
+import eu.wohlben.qits.configuration.persistence.ConfigurationDeclarationRepository;
 import eu.wohlben.qits.configuration.persistence.ConfigurationEntryRepository;
 import eu.wohlben.qits.configuration.persistence.ConfigurationRevisionRepository;
+import eu.wohlben.qits.configuration.persistence.DeclaredKeyRepository;
 import eu.wohlben.qits.db.DbRetry;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -17,15 +25,26 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 
 /**
  * The whole of what this service does: store a configuration entry, version it, and serve it.
+ *
+ * <p><b>THE DOCTRINE AMENDMENT, and it is one line wide.</b> "Store, do not parse" holds for entry
+ * VALUES and holds completely — nothing in this class reads one, and what a mount or a published
+ * port means is still qits-platform-deployments' {@code ServiceExtras}. What has changed is that
+ * there is a SECOND document class in this context: the DECLARATION an application makes about its
+ * own keys, parsed by the one strict parser ({@link DeclarationParser}). {@link #resolve} therefore
+ * answers with more than it was told — declared defaults, and serviceAddress keys rendered per
+ * environment — because those are answers only the service holding both halves can give. The entry
+ * values it layers on top are still bytes it never looked at.
  *
  * <p><b>An entry is addressed by (env, application, key), and every method here takes the env
  * first.</b> This service runs on the platform plane and holds every environment's configuration in
@@ -65,7 +84,24 @@ public class ConfigurationService {
 
   @Inject ConfigurationRevisionRepository revisions;
 
+  @Inject ConfigurationDeclarationRepository declarations;
+
+  @Inject DeclaredKeyRepository declaredKeys;
+
+  @Inject ConfigurationMapper mapper;
+
   @Inject InstanceEnv instanceEnv;
+
+  /**
+   * One application's governing declaration with its keys indexed — the shape every read that has to
+   * compare stored rows against declared ones wants.
+   *
+   * <p>Held for the length of one call and never cached. A declaration arriving, or being rolled
+   * back, changes the answer for rows nobody touched, and a cache would be the place that stays
+   * right until it matters.
+   */
+  private record Governing(
+      ConfigurationDeclaration declaration, Map<String, ConfigurationDeclaredKey> keys) {}
 
   // ---------------------------------------------------------------- reads
 
@@ -135,13 +171,153 @@ public class ConfigurationService {
    * place for this service's addressing to be written down.
    */
   public ResolvedConfigurationDto resolve(String env, String application) {
+    return resolve(env, application, Optional.empty());
+  }
+
+  /**
+   * THE OVERLAY READ: the same map, with the application's declaration of version {@code version}
+   * merged underneath the stored entries.
+   *
+   * <p><b>The precedence, lowest first: declared default, then an imported value, then an operator's
+   * value.</b> Only the first of those three is decided here — the other two are one stored row,
+   * ordered against each other at the WRITE (see {@link #importProperties}), so this method layers
+   * exactly two things and does not have to reason about who wrote what.
+   *
+   * <p><b>An absent version is EXACTLY today's behaviour and never a 404.</b> That is not
+   * politeness, it is the rollout: the deployer reads this route once per deployment and does not
+   * pass a version yet, and a service that started requiring one would take the platform down for a
+   * feature nobody was using. When it does pass one, the answer gets richer without the shape
+   * changing.
+   *
+   * <p><b>A version that names no declaration IS a 404</b>, and the asymmetry is deliberate. Absent
+   * means "I am not asking about declarations"; present means "resolve me against this document",
+   * and answering that with a bare entry map would be handing back a configuration missing every
+   * default the caller asked for, with nothing to say so.
+   *
+   * <p><b>What each declared type contributes:</b>
+   *
+   * <ul>
+   *   <li>{@code string}, {@code boolean}, {@code number} — the default, if it carries one, which a
+   *       stored entry then overwrites. A key declared with no default and never set is absent from
+   *       the answer, which is the honest shape: the container gets no variable rather than an empty
+   *       one.
+   *   <li>{@code serviceAddress} — rendered here and NOT overridable. A stored row on such a key is
+   *       ignored for the value and reported orphaned by the entries read; the address is a fact
+   *       about the platform's own topology, and letting an operator pin it by hand is how a
+   *       container survives a plane move by pointing at where the service used to be.
+   *   <li>{@code packageVersion} — nothing unless an entry exists. There is no default by design:
+   *       the version is whatever a release put there, and a fallback is a container started on a tag
+   *       nobody shipped.
+   * </ul>
+   */
+  public ResolvedConfigurationDto resolve(
+      String env, String application, Optional<String> version) {
     String environment = ConfigurationKeys.requireEnv(env);
     String app = ConfigurationKeys.requireApplication(application);
     Map<String, String> properties = new LinkedHashMap<>();
+    Set<String> renderedByThePlatform = new LinkedHashSet<>();
+
+    if (version.isPresent()) {
+      String tag = ConfigurationKeys.requireDeclarationVersion(version.get());
+      declarations
+          .find(app, tag)
+          .orElseThrow(
+              () -> new NotFoundException("No declaration " + tag + " for application " + app));
+      for (ConfigurationDeclaredKey declared : declaredKeys.listOf(app, tag)) {
+        String property = ExtrasProperties.propertyName(app, declared.declaredKey);
+        switch (declared.declaredType) {
+          case DeclarationParser.TYPE_SERVICE_ADDRESS -> {
+            properties.put(property, renderAddress(environment, app, declared));
+            renderedByThePlatform.add(declared.declaredKey);
+          }
+          case DeclarationParser.TYPE_PACKAGE_VERSION -> {
+            // Nothing. An unset package version is an omitted key, not an empty one.
+          }
+          default -> {
+            if (declared.defaultValue != null) {
+              properties.put(property, declared.defaultValue);
+            }
+          }
+        }
+      }
+    }
+
     for (ConfigurationEntry entry : entries.listByApplication(environment, app)) {
+      if (renderedByThePlatform.contains(entry.entryKey)) {
+        continue;
+      }
       properties.put(ExtrasProperties.propertyName(app, entry.entryKey), entry.entryValue);
     }
     return new ResolvedConfigurationDto(revisions.headRevisionOf(environment, app), properties);
+  }
+
+  /**
+   * One serviceAddress key, turned into the URL a container in {@code env} can actually dial.
+   *
+   * <p><b>The host is the deployer's WIRE ALIAS, and which alias depends on the addressed
+   * application's own plane.</b> A platform-plane application answers at its bare application name
+   * ({@code qits-events}) from every environment at once; an environment-plane one answers at {@code
+   * <env>-<application>} ({@code dev-qits-ci}), once per tier. That is {@code PdNetworks.alias}
+   * restated on this side, and it is restated rather than derived from the name — nothing about the
+   * string {@code qits-events} says which plane it is on, which is exactly why the plane is a
+   * recorded fact and not an inference.
+   *
+   * <p><b>A target that has never declared is a 422 naming it, not a guess.</b> Either alias would
+   * be syntactically fine and one of them would be wrong, and a wrong alias is not an error anybody
+   * sees: it is a container that boots, passes its health gate and dials a name docker's DNS does not
+   * resolve, discovered by whoever is on call. The refusal moves that to the read, where the
+   * deployment has not happened yet.
+   */
+  private String renderAddress(
+      String env, String application, ConfigurationDeclaredKey declared) {
+    ConfigurationDeclaration target =
+        declarations
+            .governingOf(declared.serviceRef)
+            .orElseThrow(
+                () ->
+                    new UnprocessableEntityException(
+                        "Key "
+                            + declared.declaredKey
+                            + " of application "
+                            + application
+                            + " addresses "
+                            + declared.serviceRef
+                            + ", which has not declared its deployment plane. The address depends on"
+                            + " it — a platform-plane service answers at `"
+                            + declared.serviceRef
+                            + "` and an environment-plane one at `"
+                            + env
+                            + "-"
+                            + declared.serviceRef
+                            + "` — and a guess here is a container dialling the void."));
+    String alias =
+        ConfigurationKeys.TARGET_PLATFORM.equals(target.deploymentTarget)
+            ? declared.serviceRef
+            : env + "-" + declared.serviceRef;
+    return "http://" + alias + ":" + declared.servicePort;
+  }
+
+  /**
+   * One application's current entries in one env, as wire shapes, with {@code orphaned} decided
+   * against the governing declaration.
+   *
+   * <p>Read-only in every sense: an orphan is reported and never cleaned up. A key the current
+   * declaration does not account for is usually a key the NEXT deployment removes and sometimes a
+   * key somebody set early for a version not released yet, and a store that deleted the second kind
+   * to tidy up the first would be a store nobody could stage a change in.
+   */
+  public List<ConfigurationEntryDto> entryViews(String env, String application) {
+    String environment = ConfigurationKeys.requireEnv(env);
+    String app = ConfigurationKeys.requireApplication(application);
+    Optional<Governing> governing = governing(app);
+    return entries.listByApplication(environment, app).stream()
+        .map(entry -> mapper.toDto(entry, isOrphaned(governing, entry.entryKey)))
+        .toList();
+  }
+
+  /** One entry as a wire shape, with the same orphan verdict the listing gives it. */
+  public ConfigurationEntryDto view(ConfigurationEntry entry) {
+    return mapper.toDto(entry, isOrphaned(governing(entry.application), entry.entryKey));
   }
 
   /**
@@ -206,8 +382,18 @@ public class ConfigurationService {
   // ---------------------------------------------------------------- writes
 
   /**
-   * Set one entry's value in one env. New keys are created, existing ones moved; an identical value
-   * writes no revision and returns the entry it found.
+   * Set one entry's value in one env, as an OPERATOR. New keys are created, existing ones moved; an
+   * identical value writes no revision and returns the entry it found.
+   *
+   * <p>It writes {@link ConfigurationEntry#CLASS_PLAIN}, which is the top of the precedence — so a
+   * value set here survives every later run of the bootstrap's import. That is the whole point of
+   * the class column: an operator fixing a live environment must not be undone by the next boot.
+   *
+   * <p><b>One key it refuses: a {@code serviceAddress} in the governing declaration.</b> Those are
+   * rendered by the platform at every resolved read and a stored row on one is ignored, so accepting
+   * the write would be answering 200 to an edit that changes nothing a container will ever see. The
+   * 400 says so. {@code packageVersion} keys stay editable — a version IS a stored value, and pinning
+   * one by hand is a real operation.
    */
   public ConfigurationEntry upsert(
       String env, String application, String key, String value, String actor) {
@@ -215,10 +401,18 @@ public class ConfigurationService {
     String app = ConfigurationKeys.requireApplication(application);
     String entryKey = ConfigurationKeys.requireKey(key);
     String entryValue = ConfigurationKeys.requireValue(value);
+    refuseIfRenderedByThePlatform(app, entryKey);
     return DbRetry.inNewTx(
         "set " + environment + "/" + ExtrasProperties.propertyName(app, entryKey),
         () -> {
-          ConfigurationEntry stored = store(environment, app, entryKey, entryValue, actor);
+          ConfigurationEntry stored =
+              store(
+                  environment,
+                  app,
+                  entryKey,
+                  entryValue,
+                  ConfigurationEntry.CLASS_PLAIN,
+                  actor);
           entries.flush();
           return stored;
         });
@@ -267,6 +461,18 @@ public class ConfigurationService {
    *
    * <p>Idempotent by construction: it calls {@link #store}, which appends nothing when the value is
    * already what the line says.
+   *
+   * <p><b>IT WRITES THE {@code imported} CLASS AND WILL NOT OVERWRITE AN OPERATOR'S ROW.</b> The
+   * precedence is declared default &lt; imported &lt; operator, and it is enforced HERE, at the
+   * write, rather than at the read. Enforcing it at the read would mean keeping both values and
+   * choosing between them on every deployment; enforcing it here means the store holds one value per
+   * key and the answer to "what is set" is the row. The stake is concrete: this import runs from the
+   * bootstrap on every boot, so without the rule an operator's fix to a live environment is silently
+   * reverted the next time anything restarts — and reverted by a file, which is the hardest kind of
+   * change to attribute afterwards.
+   *
+   * <p>Rows it declines are counted as {@code kept} rather than dropped quietly, because "the file
+   * and the store disagree" is the one outcome of an import somebody should look at.
    */
   public ImportSummaryDto importProperties(String env, String text, String actor) {
     String environment = ConfigurationKeys.requireEnv(env);
@@ -277,19 +483,25 @@ public class ConfigurationService {
         () -> {
           int imported = 0;
           int unchanged = 0;
+          int kept = 0;
           for (ExtrasProperties.Parsed line : lines) {
             String app = ConfigurationKeys.requireApplication(line.application());
             String key = ConfigurationKeys.requireKey(line.key());
             String value = ConfigurationKeys.requireValue(line.value());
-            if (wouldChange(environment, app, key, value)) {
-              store(environment, app, key, value, actor);
+            Optional<ConfigurationEntry> existing = entries.findEntry(environment, app, key);
+            if (existing
+                .map(entry -> ConfigurationEntry.CLASS_PLAIN.equals(entry.entryClass))
+                .orElse(false)) {
+              kept++;
+            } else if (wouldChange(environment, app, key, value)) {
+              store(environment, app, key, value, ConfigurationEntry.CLASS_IMPORTED, actor);
               imported++;
             } else {
               unchanged++;
             }
           }
           entries.flush();
-          return new ImportSummaryDto(imported, unchanged, ignored);
+          return new ImportSummaryDto(imported, unchanged, kept, ignored);
         });
   }
 
@@ -301,9 +513,16 @@ public class ConfigurationService {
    *
    * <p>The revision is flushed before the head is written, because the head names the revision's
    * generated seq and an identity column has no value until the insert has run.
+   *
+   * <p><b>The CLASS comes from the caller.</b> This method is not in a position to know whether the
+   * request behind it is a person fixing an environment or a script replaying a file, and the
+   * precedence the import rests on would then rest on a guess. So every caller names its own class,
+   * and the class MOVES on a write: an operator who edits an imported row makes it theirs, which is
+   * what stops the next import from taking it back. An identical value changes nothing at all —
+   * including the class — because it writes nothing at all.
    */
   private ConfigurationEntry store(
-      String env, String application, String key, String value, String actor) {
+      String env, String application, String key, String value, String entryClass, String actor) {
     Optional<ConfigurationEntry> found = entries.findEntry(env, application, key);
     if (found.isPresent() && Objects.equals(found.get().entryValue, value)) {
       return found.get();
@@ -315,8 +534,8 @@ public class ConfigurationService {
       entry.env = env;
       entry.application = application;
       entry.entryKey = key;
-      entry.entryClass = ConfigurationEntry.CLASS_PLAIN;
     }
+    entry.entryClass = entryClass;
     entry.entryValue = value;
     entry.headRevision = revision.seq;
     entry.updatedAt = revision.updatedAt;
@@ -342,6 +561,64 @@ public class ConfigurationService {
     revisions.persist(revision);
     revisions.flush();
     return revision;
+  }
+
+  /** The governing declaration with its keys indexed, or empty when the application has none. */
+  private Optional<Governing> governing(String application) {
+    return declarations
+        .governingOf(application)
+        .map(
+            declaration -> {
+              Map<String, ConfigurationDeclaredKey> keys = new LinkedHashMap<>();
+              for (ConfigurationDeclaredKey key :
+                  declaredKeys.listOf(declaration.application, declaration.version)) {
+                keys.put(key.declaredKey, key);
+              }
+              return new Governing(declaration, keys);
+            });
+  }
+
+  /**
+   * Whether a stored key is unaccounted for by the governing declaration.
+   *
+   * <p>Two ways to be: the declaration does not mention the key, or it declares it a {@code
+   * serviceAddress}, whose stored row is ignored in favour of the rendered address. They are one
+   * flag because they are one message to a person — this row is not reaching the container.
+   *
+   * <p><b>No declaration means nothing is orphaned.</b> Unknown is not the same as unaccounted for,
+   * and flagging every row of every application that has not adopted declarations yet would make the
+   * flag mean "this platform is mid-rollout" rather than anything about the row.
+   */
+  private static boolean isOrphaned(Optional<Governing> governing, String key) {
+    return governing
+        .map(
+            found -> {
+              ConfigurationDeclaredKey declared = found.keys().get(key);
+              return declared == null
+                  || DeclarationParser.TYPE_SERVICE_ADDRESS.equals(declared.declaredType);
+            })
+        .orElse(false);
+  }
+
+  /** The PUT guard: a key the platform renders is not a key a person may set. */
+  private void refuseIfRenderedByThePlatform(String application, String key) {
+    governing(application)
+        .map(found -> found.keys().get(key))
+        .filter(
+            declared -> DeclarationParser.TYPE_SERVICE_ADDRESS.equals(declared.declaredType))
+        .ifPresent(
+            declared -> {
+              throw new BadRequestException(
+                  "The key "
+                      + key
+                      + " is declared a serviceAddress by application "
+                      + application
+                      + ": it is rendered by the platform; cannot be set by hand. It resolves to "
+                      + declared.serviceRef
+                      + " on port "
+                      + declared.servicePort
+                      + ", per environment.");
+            });
   }
 
   private boolean wouldChange(String env, String application, String key, String value) {

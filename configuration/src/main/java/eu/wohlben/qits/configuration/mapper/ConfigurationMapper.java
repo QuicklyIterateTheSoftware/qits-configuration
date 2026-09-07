@@ -21,10 +21,19 @@ import org.mapstruct.Mapping;
 @Mapper(componentModel = "jakarta")
 public interface ConfigurationMapper {
 
-  @Mapping(target = "key", source = "entryKey")
-  @Mapping(target = "value", source = "entryValue")
-  @Mapping(target = "revision", source = "headRevision")
-  ConfigurationEntryDto toDto(ConfigurationEntry entity);
+  /**
+   * <b>Two source parameters, because one wire field is not on the entity at all.</b> {@code
+   * orphaned} is decided by the application's governing declaration and not by the row — the same
+   * row is orphaned or not depending on a document nobody touched when it was written — so it is
+   * computed by {@code ConfigurationService} and handed in beside the entity rather than persisted.
+   * A single-argument mapping would have left it silently false, which is the failure this mapper
+   * exists to make impossible.
+   */
+  @Mapping(target = "key", source = "entity.entryKey")
+  @Mapping(target = "value", source = "entity.entryValue")
+  @Mapping(target = "revision", source = "entity.headRevision")
+  @Mapping(target = "orphaned", source = "orphaned")
+  ConfigurationEntryDto toDto(ConfigurationEntry entity, boolean orphaned);
 
   @Mapping(target = "key", source = "entryKey")
   @Mapping(target = "value", source = "entryValue")

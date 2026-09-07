@@ -35,8 +35,29 @@ import java.util.UUID;
             columnNames = {"env", "application", "key"}))
 public class ConfigurationEntry extends PanacheEntityBase {
 
-  /** The plain entry class, and the only one v1 writes. See {@link #entryClass}. */
+  /**
+   * THE OPERATOR'S CLASS: a value a person set through the API, by hand.
+   *
+   * <p>It was "the only word v1 writes" and it is now the top of a precedence: a declared default
+   * loses to an imported value, and an imported value loses to this. See {@link #CLASS_IMPORTED}.
+   */
   public static final String CLASS_PLAIN = "plain";
+
+  /**
+   * THE BOOTSTRAP'S CLASS: a value the bulk import wrote out of the deployer's properties file.
+   *
+   * <p><b>The distinction is what lets the import be safe to re-run.</b> The import seeds an
+   * environment from a file and runs on every boot; an operator fixes a live environment through the
+   * API. With one word for both, the next boot would silently undo the fix — the failure this
+   * vocabulary exists to remove. So the import writes {@code imported}, refuses to overwrite a {@code
+   * plain} row, and reports how many it kept.
+   *
+   * <p>Rows written before this word existed are all {@code plain}, which reads as "an operator set
+   * it" and protects them. That is the conservative direction to be wrong in: the cost is an import
+   * that declines to update a row nobody typed, reported in the summary, rather than an edit
+   * silently reverted.
+   */
+  public static final String CLASS_IMPORTED = "imported";
 
   @Id public UUID id;
 
@@ -71,9 +92,16 @@ public class ConfigurationEntry extends PanacheEntityBase {
   public String entryValue;
 
   /**
-   * What kind of entry this is: {@link #CLASS_PLAIN} in v1 and nothing else. A {@code secret} class
-   * is the qits-secrets fold-in and arrives with the code that can hold one — an in-memory,
-   * approval-gated, one-shot credential is not a value this table may ever carry.
+   * What kind of entry this is, and WHO WROTE IT: {@link #CLASS_PLAIN} for an operator, {@link
+   * #CLASS_IMPORTED} for the bootstrap's file.
+   *
+   * <p><b>It is the writer's own word.</b> {@code ConfigurationService.store} takes the class from
+   * its caller rather than deciding one, because the door is not in a position to know whether the
+   * request behind it is a person fixing an environment or a script replaying a file — and a store
+   * that guessed would be a store whose precedence rule rested on a guess.
+   *
+   * <p>A {@code secret} class is the qits-secrets fold-in and arrives with the code that can hold one
+   * — an in-memory, approval-gated, one-shot credential is not a value this table may ever carry.
    */
   @Column(name = "class", nullable = false, length = 32)
   public String entryClass;

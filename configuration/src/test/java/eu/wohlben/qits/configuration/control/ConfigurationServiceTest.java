@@ -8,17 +8,26 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.configuration.dto.ApplicationEnvSummaryDto;
 import eu.wohlben.qits.configuration.dto.ApplicationSummaryDto;
+import eu.wohlben.qits.configuration.dto.ConfigurationEntryDto;
+import eu.wohlben.qits.configuration.dto.DeclarationDto;
+import eu.wohlben.qits.configuration.dto.DeclarationSummaryDto;
 import eu.wohlben.qits.configuration.dto.ImagePinDto;
 import eu.wohlben.qits.configuration.dto.ImportSummaryDto;
 import eu.wohlben.qits.configuration.dto.ResolvedConfigurationDto;
 import eu.wohlben.qits.configuration.entity.ConfigurationEntry;
 import eu.wohlben.qits.configuration.entity.ConfigurationRevision;
 import eu.wohlben.qits.configuration.error.BadRequestException;
+import eu.wohlben.qits.configuration.error.ConflictException;
+import eu.wohlben.qits.configuration.error.DeclarationParseException;
 import eu.wohlben.qits.configuration.error.NotFoundException;
+import eu.wohlben.qits.configuration.error.UnprocessableEntityException;
 import eu.wohlben.qits.configuration.persistence.ConfigurationEntryRepository;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -33,6 +42,16 @@ import org.junit.jupiter.api.Test;
  * matching {@code qits.configuration.legacy-env} in this module's test properties — so the rows these
  * tests write sit in the same env the V2 backfill would have stamped, and a value read back under
  * another env is the thing {@link #anEnvIsPartOfTheIdentityOfAnEntry} refuses.
+ *
+ * <p><b>ONE TRAP, MEASURED RATHER THAN FEARED: do not read a row through {@link
+ * ConfigurationService#require} BEFORE writing it and then read it again after.</b> Every write here
+ * runs in {@code DbRetry.inNewTx}, which gets a persistence context of its own; the reads run in the
+ * test method's ambient one. So a read taken before the write leaves that instance in the ambient
+ * first-level cache, and the read after it comes back from there — showing the value the write
+ * replaced, while the row in the database is correct (confirmed against the raw row). Assert on what
+ * the write RETURNED, or read the row through something transactional, as {@link
+ * #anOperatorEditingAnImportedRowMakesItTheirs} does with the second import. Nothing about this is a
+ * property of the service; it is a property of asking a session twice.
  */
 @QuarkusTest
 class ConfigurationServiceTest {
@@ -43,7 +62,18 @@ class ConfigurationServiceTest {
   /** A second env, used only to prove that the first one's rows are not visible from it. */
   private static final String OTHER_ENV = "other";
 
+  /**
+   * The version the overlay tests declare under.
+   *
+   * <p>One literal for all of them, because a declaration is addressed by {@code (application,
+   * version)} and every test here already owns an application of its own — so a shared version
+   * collides with nothing, and a generated one would only make the assertions harder to read.
+   */
+  private static final String VERSION = "2026.907.1";
+
   @Inject ConfigurationService configuration;
+
+  @Inject DeclarationService declarations;
 
   @Inject ConfigurationEntryRepository entries;
 
@@ -345,5 +375,472 @@ class ConfigurationServiceTest {
     assertThrows(
         BadRequestException.class, () -> configuration.upsert(ENV, "Bad-App", "env.A", "x", null));
     assertTrue(configuration.entriesOf(ENV, "app-guard").isEmpty());
+  }
+
+  // ------------------------------------------------------------ declarations and the overlay
+
+  /** Seed one declaration and return the version it was recorded under. */
+  private String declare(String application, String target, String document) {
+    declarations.declare(application, VERSION, target, document, "pipeline");
+    return VERSION;
+  }
+
+  private String property(String application, String key) {
+    return ExtrasProperties.propertyName(application, key);
+  }
+
+  /**
+   * THE MERGE ORDER, asserted in one method because it is one claim: a declared default is the
+   * FLOOR, and everything stored stands on top of it.
+   *
+   * <p>Both stored classes are exercised — an operator's {@code plain} row and the import's {@code
+   * imported} row — because "the default lost" has to be true of both, and a merge that consulted
+   * the class would be the beginning of a read-time precedence this service deliberately does not
+   * have.
+   */
+  @Test
+  void aStoredValueBeatsADeclaredDefaultWhicheverWroteIt() {
+    String version =
+        declare(
+            "app-overlay",
+            ConfigurationKeys.TARGET_ENVIRONMENT,
+            """
+            keys:
+              env.QITS_UNSET:
+                type: string
+                default: from-the-declaration
+              env.QITS_OPERATOR:
+                type: string
+                default: from-the-declaration
+              env.QITS_IMPORTED:
+                type: string
+                default: from-the-declaration
+            """);
+
+    configuration.upsert(ENV, "app-overlay", "env.QITS_OPERATOR", "from-the-operator", "alice");
+    configuration.importProperties(
+        ENV,
+        "qits.platform.deployments.extras.app-overlay.env.QITS_IMPORTED=from-the-file\n",
+        "bootstrap");
+
+    Map<String, String> properties =
+        configuration.resolve(ENV, "app-overlay", Optional.of(version)).properties();
+
+    assertEquals(
+        "from-the-declaration",
+        properties.get(property("app-overlay", "env.QITS_UNSET")),
+        "a key nobody set falls back to what the application declared");
+    assertEquals(
+        "from-the-operator",
+        properties.get(property("app-overlay", "env.QITS_OPERATOR")),
+        "an operator's value beats the default");
+    assertEquals(
+        "from-the-file",
+        properties.get(property("app-overlay", "env.QITS_IMPORTED")),
+        "so does an imported one — the class orders the two WRITES, not the read");
+  }
+
+  @Test
+  void aDeclaredKeyWithNoDefaultIsAbsentRatherThanEmpty() {
+    String version =
+        declare(
+            "app-nodefault",
+            ConfigurationKeys.TARGET_ENVIRONMENT,
+            "keys:\n  env.QITS_A:\n    type: string\n");
+
+    assertFalse(
+        configuration
+            .resolve(ENV, "app-nodefault", Optional.of(version))
+            .properties()
+            .containsKey(property("app-nodefault", "env.QITS_A")),
+        "the container gets no variable rather than an empty one");
+  }
+
+  @Test
+  void aResolvedReadWithNoVersionIsExactlyTheEntriesAndNeverA404() {
+    declare(
+        "app-versionless",
+        ConfigurationKeys.TARGET_ENVIRONMENT,
+        "keys:\n  env.QITS_A:\n    type: string\n    default: from-the-declaration\n");
+    configuration.upsert(ENV, "app-versionless", "env.QITS_B", "stored", "alice");
+
+    ResolvedConfigurationDto resolved = configuration.resolve(ENV, "app-versionless");
+
+    assertEquals(
+        1,
+        resolved.properties().size(),
+        "the deployer does not pass a version yet, and until it does this read must not change at"
+            + " all — a default appearing unasked would be a value nobody could account for");
+    assertEquals("stored", resolved.properties().get(property("app-versionless", "env.QITS_B")));
+  }
+
+  @Test
+  void aVersionThatNamesNoDeclarationIsA404() {
+    NotFoundException failure =
+        assertThrows(
+            NotFoundException.class,
+            () -> configuration.resolve(ENV, "app-unknown-version", Optional.of("2026.1.1")));
+    assertTrue(failure.getMessage().contains("2026.1.1"), failure.getMessage());
+    assertTrue(failure.getMessage().contains("app-unknown-version"), failure.getMessage());
+  }
+
+  /**
+   * THE PLANE DECIDES THE HOSTNAME, and this is the test that pins which one.
+   *
+   * <p>A platform-plane service answers at its bare application name from every environment at once;
+   * an environment-plane one answers at {@code <env>-<application>}. That is the deployer's
+   * {@code PdNetworks.alias} and the reason the plane is a recorded fact rather than something
+   * inferred from the name — nothing about the string {@code qits-events} says which side it is on.
+   */
+  @Test
+  void aServiceAddressRendersAgainstTheADDRESSEDApplicationsOwnPlane() {
+    declare("app-plane-platform", ConfigurationKeys.TARGET_PLATFORM, "keys: {}\n");
+    declare("app-plane-env", ConfigurationKeys.TARGET_ENVIRONMENT, "keys: {}\n");
+    String version =
+        declare(
+            "app-addresser",
+            ConfigurationKeys.TARGET_ENVIRONMENT,
+            """
+            keys:
+              env.QITS_PLATFORM_URL:
+                type: serviceAddress
+                service: app-plane-platform
+                port: 8080
+              env.QITS_TIER_URL:
+                type: serviceAddress
+                service: app-plane-env
+                port: 9090
+            """);
+
+    Map<String, String> properties =
+        configuration.resolve(ENV, "app-addresser", Optional.of(version)).properties();
+
+    assertEquals(
+        "http://app-plane-platform:8080",
+        properties.get(property("app-addresser", "env.QITS_PLATFORM_URL")),
+        "a platform-plane peer is reached at its bare alias from every environment");
+    assertEquals(
+        "http://" + ENV + "-app-plane-env:9090",
+        properties.get(property("app-addresser", "env.QITS_TIER_URL")),
+        "an environment-plane peer is reached at <env>-<application>");
+    assertEquals(
+        "http://other-app-plane-env:9090",
+        configuration
+            .resolve(OTHER_ENV, "app-addresser", Optional.of(version))
+            .properties()
+            .get(property("app-addresser", "env.QITS_TIER_URL")),
+        "and the same declaration renders a different address in a different environment, which is"
+            + " the whole reason the host is not stored");
+  }
+
+  @Test
+  void aStoredValueOnAServiceAddressKeyIsIgnoredAndReported() {
+    declare("app-rendered-target", ConfigurationKeys.TARGET_PLATFORM, "keys: {}\n");
+    String version =
+        declare(
+            "app-rendered",
+            ConfigurationKeys.TARGET_ENVIRONMENT,
+            """
+            keys:
+              env.QITS_URL:
+                type: serviceAddress
+                service: app-rendered-target
+                port: 8080
+            """);
+
+    // The row exists only because the import path does not run the PUT guard — the file is the
+    // deployer's old config volume and it predates every declaration.
+    configuration.importProperties(
+        ENV,
+        "qits.platform.deployments.extras.app-rendered.env.QITS_URL=http://somewhere-else:1\n",
+        "bootstrap");
+
+    assertEquals(
+        "http://app-rendered-target:8080",
+        configuration
+            .resolve(ENV, "app-rendered", Optional.of(version))
+            .properties()
+            .get(property("app-rendered", "env.QITS_URL")),
+        "the rendered address wins: a hand-pinned one is how a container survives a plane move by"
+            + " pointing at where the service used to be");
+
+    ConfigurationEntryDto view = configuration.entryViews(ENV, "app-rendered").get(0);
+    assertTrue(
+        view.orphaned(),
+        "and the row says so, rather than sitting in the store looking like it is in effect");
+  }
+
+  @Test
+  void anAddressIntoAnApplicationWithNoDeclaredPlaneIsRefusedRatherThanGuessed() {
+    String version =
+        declare(
+            "app-void",
+            ConfigurationKeys.TARGET_ENVIRONMENT,
+            """
+            keys:
+              env.QITS_URL:
+                type: serviceAddress
+                service: app-never-declared
+                port: 8080
+            """);
+
+    UnprocessableEntityException failure =
+        assertThrows(
+            UnprocessableEntityException.class,
+            () -> configuration.resolve(ENV, "app-void", Optional.of(version)));
+    assertEquals(422, failure.statusCode());
+    assertTrue(
+        failure.getMessage().contains("app-never-declared"),
+        "the refusal names the application that has not declared: " + failure.getMessage());
+    assertTrue(
+        failure.getMessage().contains("deployment plane"),
+        "and what is missing about it: " + failure.getMessage());
+  }
+
+  @Test
+  void aPackageVersionIsOmittedUntilSomethingHasSetIt() {
+    String version =
+        declare(
+            "app-package",
+            ConfigurationKeys.TARGET_ENVIRONMENT,
+            """
+            keys:
+              env.QITS_IMAGE_VERSION:
+                type: packageVersion
+                package:
+                  type: docker
+                  name: qits/workspace
+            """);
+    String property = property("app-package", "env.QITS_IMAGE_VERSION");
+
+    assertFalse(
+        configuration
+            .resolve(ENV, "app-package", Optional.of(version))
+            .properties()
+            .containsKey(property),
+        "a version nobody released is an omitted key, not an empty one");
+
+    configuration.upsert(ENV, "app-package", "env.QITS_IMAGE_VERSION", "2026.907.1", "release");
+
+    assertEquals(
+        "2026.907.1",
+        configuration
+            .resolve(ENV, "app-package", Optional.of(version))
+            .properties()
+            .get(property),
+        "a packageVersion key stays editable — pinning a version by hand is a real operation");
+  }
+
+  @Test
+  void aServiceAddressKeyCannotBeSetByHand() {
+    declare("app-guarded-target", ConfigurationKeys.TARGET_PLATFORM, "keys: {}\n");
+    declare(
+        "app-guarded",
+        ConfigurationKeys.TARGET_ENVIRONMENT,
+        """
+        keys:
+          env.QITS_URL:
+            type: serviceAddress
+            service: app-guarded-target
+            port: 8080
+          env.QITS_OTHER:
+            type: string
+        """);
+
+    BadRequestException failure =
+        assertThrows(
+            BadRequestException.class,
+            () -> configuration.upsert(ENV, "app-guarded", "env.QITS_URL", "http://mine:1", "alice"));
+    assertTrue(
+        failure.getMessage().contains("cannot be set by hand"),
+        "and it says why rather than only that: " + failure.getMessage());
+    assertTrue(configuration.entriesOf(ENV, "app-guarded").isEmpty());
+
+    configuration.upsert(ENV, "app-guarded", "env.QITS_OTHER", "fine", "alice");
+    assertEquals(1, configuration.entriesOf(ENV, "app-guarded").size(), "only that one key is shut");
+  }
+
+  @Test
+  void anImportDoesNotOverwriteAnOperatorsValueAndSaysHowManyItKept() {
+    configuration.upsert(ENV, "app-precedence", "env.QITS_A", "the-operators", "alice");
+
+    ImportSummaryDto summary =
+        configuration.importProperties(
+            ENV,
+            """
+            qits.platform.deployments.extras.app-precedence.env.QITS_A=the-files
+            qits.platform.deployments.extras.app-precedence.env.QITS_B=the-files
+            """,
+            "bootstrap");
+
+    assertEquals(1, summary.imported());
+    assertEquals(1, summary.kept(), "the operator's row is kept and counted, never overwritten");
+    assertEquals(0, summary.unchanged());
+    assertEquals(
+        "the-operators",
+        configuration.require(ENV, "app-precedence", "env.QITS_A").entryValue,
+        "the bootstrap runs on every boot; a fix made by hand must survive the next one");
+    assertEquals(
+        ConfigurationEntry.CLASS_IMPORTED,
+        configuration.require(ENV, "app-precedence", "env.QITS_B").entryClass,
+        "what the import DID write carries its own class");
+  }
+
+  @Test
+  void anOperatorEditingAnImportedRowMakesItTheirs() {
+    String file = "qits.platform.deployments.extras.app-adopt.env.QITS_A=the-files\n";
+    assertEquals(1, configuration.importProperties(ENV, file, "bootstrap").imported());
+
+    assertEquals(
+        ConfigurationEntry.CLASS_PLAIN,
+        configuration.upsert(ENV, "app-adopt", "env.QITS_A", "the-operators", "alice").entryClass,
+        "the class moves with the write, which is what stops the next import taking the row back");
+
+    ImportSummaryDto again = configuration.importProperties(ENV, file, "bootstrap");
+    assertEquals(
+        1,
+        again.kept(),
+        "and this is the assertion that it really landed in the STORE rather than on one instance:"
+            + " the import reads in a transaction of its own, so it is looking at the row");
+    assertEquals(0, again.imported());
+  }
+
+  @Test
+  void anEntryTheGoverningDeclarationDoesNotAccountForIsFlaggedAndNothingElseIs() {
+    configuration.upsert(ENV, "app-orphan", "env.QITS_DECLARED", "one", "alice");
+    configuration.upsert(ENV, "app-orphan", "env.QITS_STRAY", "two", "alice");
+
+    assertTrue(
+        configuration.entryViews(ENV, "app-orphan").stream().noneMatch(ConfigurationEntryDto::orphaned),
+        "an application with no declaration has nothing orphaned: unknown is not unaccounted for");
+
+    declare(
+        "app-orphan",
+        ConfigurationKeys.TARGET_ENVIRONMENT,
+        "keys:\n  env.QITS_DECLARED:\n    type: string\n");
+
+    Map<String, Boolean> orphaned =
+        configuration.entryViews(ENV, "app-orphan").stream()
+            .collect(Collectors.toMap(ConfigurationEntryDto::key, ConfigurationEntryDto::orphaned));
+    assertEquals(Boolean.FALSE, orphaned.get("env.QITS_DECLARED"));
+    assertEquals(Boolean.TRUE, orphaned.get("env.QITS_STRAY"));
+    assertEquals(
+        2,
+        configuration.entriesOf(ENV, "app-orphan").size(),
+        "and flagging wrote nothing and removed nothing");
+  }
+
+  // ------------------------------------------------------------ the declaration store itself
+
+  @Test
+  void anIdenticalDocumentIsANoOpAndADifferentOneUnderTheSameVersionIsAConflict() {
+    String document = "keys:\n  env.QITS_A:\n    type: string\n";
+
+    assertTrue(
+        declarations
+            .declare("app-intake", "1.0", ConfigurationKeys.TARGET_ENVIRONMENT, document, "ci")
+            .created());
+    assertFalse(
+        declarations
+            .declare("app-intake", "1.0", ConfigurationKeys.TARGET_ENVIRONMENT, document, "ci")
+            .created(),
+        "a pipeline step that retries is not an event");
+    assertEquals(
+        1,
+        declarations.declarationsOf("app-intake").size(),
+        "and it appended nothing — one version, one document");
+
+    ConflictException failure =
+        assertThrows(
+            ConflictException.class,
+            () ->
+                declarations.declare(
+                    "app-intake",
+                    "1.0",
+                    ConfigurationKeys.TARGET_ENVIRONMENT,
+                    document + "  env.QITS_B:\n    type: string\n",
+                    "ci"));
+    assertEquals(409, failure.statusCode());
+    assertTrue(
+        failure.getMessage().contains(DeclarationParser.parse("app-intake", "1.0", document).contentHash()),
+        "the refusal names the stored hash: " + failure.getMessage());
+  }
+
+  @Test
+  void removingTheNewestDeclarationLetsThePreviousOneGovernAgain() {
+    declarations.declare(
+        "app-rollback",
+        "1.0",
+        ConfigurationKeys.TARGET_ENVIRONMENT,
+        "keys:\n  env.QITS_A:\n    type: string\n    default: one\n",
+        "ci");
+    declarations.declare(
+        "app-rollback",
+        "2.0",
+        ConfigurationKeys.TARGET_ENVIRONMENT,
+        "keys:\n  env.QITS_A:\n    type: string\n    default: two\n",
+        "ci");
+    assertTrue(
+        declarations.declarationsOf("app-rollback").stream()
+            .anyMatch(each -> each.version().equals("2.0") && each.governing()));
+
+    declarations.remove("app-rollback", "2.0", "operator");
+
+    List<DeclarationSummaryDto> after = declarations.declarationsOf("app-rollback");
+    assertEquals(1, after.size(), "the document is gone");
+    assertTrue(
+        after.get(0).version().equals("1.0") && after.get(0).governing(),
+        "and the version before it governs again, with nobody re-posting an unchanged document");
+    assertThrows(
+        NotFoundException.class, () -> declarations.remove("app-rollback", "2.0", "operator"));
+  }
+
+  @Test
+  void aDeclarationKeepsBothTheParsedKeysAndTheDocument() {
+    String document =
+        """
+        # the comment is part of what was committed
+        keys:
+          env.QITS_A:
+            type: number
+            default: 3
+            description: how many
+        """;
+    declarations.declare(
+        "app-both", "1.0", ConfigurationKeys.TARGET_PLATFORM, document, "ci");
+
+    DeclarationDto stored = declarations.declaration("app-both", "1.0");
+    assertEquals(document, stored.raw());
+    assertEquals(ConfigurationKeys.TARGET_PLATFORM, stored.deploymentTarget());
+    assertEquals(1, stored.keys().size());
+    assertEquals("env.QITS_A", stored.keys().get(0).key());
+    assertEquals(DeclarationParser.TYPE_NUMBER, stored.keys().get(0).type());
+    assertEquals("3", stored.keys().get(0).defaultValue());
+    assertTrue(stored.governing());
+  }
+
+  @Test
+  void aDocumentThatWillNotParseIsRefusedAndStoresNothing() {
+    assertThrows(
+        DeclarationParseException.class,
+        () ->
+            declarations.declare(
+                "app-refused",
+                "1.0",
+                ConfigurationKeys.TARGET_ENVIRONMENT,
+                "keys:\n  env.QITS_A:\n    type: integer\n",
+                "ci"));
+    assertTrue(declarations.declarationsOf("app-refused").isEmpty());
+  }
+
+  @Test
+  void theDeploymentTargetVocabularyIsClosedAndRequired() {
+    for (String refused : new String[] {null, "", "singleton", "PLATFORM"}) {
+      assertThrows(
+          BadRequestException.class,
+          () -> declarations.declare("app-target", "1.0", refused, "keys: {}\n", "ci"),
+          "deploymentTarget " + refused);
+    }
+    assertTrue(declarations.declarationsOf("app-target").isEmpty());
   }
 }

@@ -320,4 +320,136 @@ class ConfigurationApiTest {
         .statusCode(400)
         .body("message", org.hamcrest.Matchers.containsString("DELETE"));
   }
+
+  // ------------------------------------------------------------ the overlay, over the wire
+
+  /** Record one declaration for {@code application}, the way the pipeline posts it. */
+  private void declare(String application, String version, String target, String document) {
+    given()
+        .config(
+            io.restassured.config.RestAssuredConfig.config()
+                .encoderConfig(
+                    io.restassured.config.EncoderConfig.encoderConfig()
+                        .encodeContentTypeAs("application/yaml", ContentType.TEXT)))
+        .contentType("application/yaml")
+        .body(document)
+        .when()
+        .post(
+            BASE
+                + "/applications/"
+                + application
+                + "/declarations/"
+                + version
+                + "?deploymentTarget="
+                + target)
+        .then()
+        .statusCode(201);
+  }
+
+  /**
+   * THE OVERLAY READ, at the address the deployer will use: the same route, one query parameter
+   * richer.
+   *
+   * <p>The shape is unchanged — a flat property map and a head revision — and that is the contract
+   * this test exists to hold. The deployer layers the map verbatim as a configuration source, so a
+   * per-key envelope would have made every consumer unwrap it, and the flat map is what makes
+   * {@code ?version=} an addition rather than a second API.
+   */
+  @Test
+  void theResolvedReadTakesAVersionAndKeepsItsShape() {
+    declare("api-bus", "1.0", "platform", "keys: {}\n");
+    declare(
+        "api-overlay",
+        "1.0",
+        "environment",
+        """
+        keys:
+          env.QITS_UNSET:
+            type: string
+            default: from-the-declaration
+          env.QITS_SET:
+            type: string
+            default: from-the-declaration
+          env.QITS_BUS_URL:
+            type: serviceAddress
+            service: api-bus
+            port: 8080
+        """);
+    putIn(LEGACY_ENV, "api-overlay", "env.QITS_SET", "from-the-operator", 201);
+
+    String prefix = "properties.'qits.platform.deployments.extras.api-overlay.";
+    given()
+        .when()
+        .get(BASE + "/applications/api-overlay/envs/" + LEGACY_ENV + "/resolved?version=1.0")
+        .then()
+        .statusCode(200)
+        .body("headRevision", greaterThan(0))
+        .body(prefix + "env.QITS_UNSET'", equalTo("from-the-declaration"))
+        .body(prefix + "env.QITS_SET'", equalTo("from-the-operator"))
+        // The address is rendered against api-bus's OWN plane, which is platform — so it is the
+        // bare alias, and it would be `<env>-api-bus` had api-bus declared `environment`.
+        .body(prefix + "env.QITS_BUS_URL'", equalTo("http://api-bus:8080"));
+
+    // Without the parameter the answer is the entries and nothing else. The deployer does not pass
+    // a version yet, and this is the assertion that it keeps getting exactly what it gets today.
+    given()
+        .when()
+        .get(BASE + "/applications/api-overlay/envs/" + LEGACY_ENV + "/resolved")
+        .then()
+        .statusCode(200)
+        .body("properties.size()", equalTo(1))
+        .body(prefix + "env.QITS_SET'", equalTo("from-the-operator"));
+  }
+
+  @Test
+  void aResolvedReadForAVersionThatDoesNotExistIs404() {
+    given()
+        .when()
+        .get(BASE + "/applications/api-noversion/envs/" + LEGACY_ENV + "/resolved?version=9.9")
+        .then()
+        .statusCode(404)
+        .body("message", org.hamcrest.Matchers.containsString("9.9"));
+  }
+
+  @Test
+  void anEntryTheDeclarationDoesNotAccountForIsFlaggedOnTheWire() {
+    put("api-orphan", "env.QITS_DECLARED", "one", 201);
+    put("api-orphan", "env.QITS_STRAY", "two", 201);
+    declare(
+        "api-orphan", "1.0", "environment", "keys:\n  env.QITS_DECLARED:\n    type: string\n");
+
+    given()
+        .when()
+        .get(BASE + "/applications/api-orphan/envs/" + LEGACY_ENV + "/entries")
+        .then()
+        .statusCode(200)
+        .body("entries.find { it.key == 'env.QITS_DECLARED' }.orphaned", equalTo(false))
+        .body("entries.find { it.key == 'env.QITS_STRAY' }.orphaned", equalTo(true))
+        .body("entries.find { it.key == 'env.QITS_STRAY' }.entryClass", equalTo("plain"));
+  }
+
+  @Test
+  void aKeyThePlatformRendersCannotBeSetByHand() {
+    declare("api-guard-bus", "1.0", "platform", "keys: {}\n");
+    declare(
+        "api-guarded",
+        "1.0",
+        "environment",
+        """
+        keys:
+          env.QITS_BUS_URL:
+            type: serviceAddress
+            service: api-guard-bus
+            port: 8080
+        """);
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(new ConfigurationController.SetEntryRequest("http://mine:1"))
+        .when()
+        .put(BASE + "/applications/api-guarded/envs/" + LEGACY_ENV + "/entries/env.QITS_BUS_URL")
+        .then()
+        .statusCode(400)
+        .body("message", org.hamcrest.Matchers.containsString("cannot be set by hand"));
+  }
 }

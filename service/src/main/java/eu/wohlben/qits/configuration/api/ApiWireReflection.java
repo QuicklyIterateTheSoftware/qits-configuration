@@ -4,6 +4,9 @@ import eu.wohlben.qits.configuration.dto.ApplicationEnvSummaryDto;
 import eu.wohlben.qits.configuration.dto.ApplicationSummaryDto;
 import eu.wohlben.qits.configuration.dto.ConfigurationEntryDto;
 import eu.wohlben.qits.configuration.dto.ConfigurationRevisionDto;
+import eu.wohlben.qits.configuration.dto.DeclarationDto;
+import eu.wohlben.qits.configuration.dto.DeclarationSummaryDto;
+import eu.wohlben.qits.configuration.dto.DeclaredKeyDto;
 import eu.wohlben.qits.configuration.dto.ImagePinDto;
 import eu.wohlben.qits.configuration.dto.ImportSummaryDto;
 import eu.wohlben.qits.configuration.dto.ResolvedConfigurationDto;
@@ -30,6 +33,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       ConfigurationController.SetEntryRequest.class,
       ConfigurationController.SetEntryRequest.Response.class,
       ImagePinsController.ListPinsResponse.class,
+      DeclarationsController.ListDeclarationsResponse.class,
+      DeclarationsController.DeclareResponse.class,
       ApplicationSummaryDto.class,
       // NESTED INSIDE ApplicationSummaryDto AND STILL LISTED. The application listing is a record
       // holding a list of these, and a type reached only through a generic type argument is exactly
@@ -40,7 +45,13 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       ConfigurationRevisionDto.class,
       ResolvedConfigurationDto.class,
       ImagePinDto.class,
-      ImportSummaryDto.class
+      ImportSummaryDto.class,
+      DeclarationSummaryDto.class,
+      DeclarationDto.class,
+      // NESTED INSIDE DeclarationDto AND STILL LISTED, for the reason the note above gives about
+      // ApplicationEnvSummaryDto: a type reached only through a generic type argument is the kind
+      // the build-time analysis is least reliable about.
+      DeclaredKeyDto.class
     })
 final class ApiWireReflection {
 

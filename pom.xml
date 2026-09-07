@@ -15,9 +15,21 @@
          reads — so an edit is durable, attributable and reversible, and the next deployment carries
          it.
 
-         WHAT IT DOES NOT DO. It stores, versions and serves; it parses nothing. A mount, a publish
-         or an alias VALUE is read by qits-platform-deployments' own `ServiceExtras`, which stays
-         the single parser on the platform. This repo validates the shape of a KEY and nothing else.
+         WHAT IT DOES NOT DO. It stores, versions and serves ENTRY VALUES, and parses none of them.
+         A mount, a publish or an alias VALUE is read by qits-platform-deployments' own
+         `ServiceExtras`, which stays the single parser of those on the platform. Of an entry, this
+         repo validates the shape of a KEY and nothing else.
+
+         AND THE ONE THING IT DOES PARSE. There is a second document class here:
+         `.config/qits/configuration.yml`, in which an application DECLARES its own keys — their
+         types, their defaults, and which of them are addresses of other services. This repo is the
+         one strict parser of THAT document (configuration/control/DeclarationParser), and it has to
+         be, for the same reason the deployer is the one parser of an extras value: whoever answers
+         the typed read is the one place the facts meet. A serviceAddress renders differently in
+         every environment and differently again depending on which plane the named service deploys
+         onto, and no application knows either fact about itself. The amendment does not loosen the
+         line above — a declared key's NAME goes through the same grammar a stored one does, and a
+         stored value is still never read.
 
          DELIBERATELY ITS OWN GAV, the qits-events and qits-ci case: the child directories are
          `configuration` and `service`, and `eu.wohlben:service` would collide in the shared ~/.m2

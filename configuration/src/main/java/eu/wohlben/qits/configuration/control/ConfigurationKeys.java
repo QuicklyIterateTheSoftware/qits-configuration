@@ -7,11 +7,21 @@ import java.util.regex.Pattern;
  * What an env name, an application name and an entry key may look like. Untrusted input, checked
  * where it is stored.
  *
- * <p><b>The line this class draws is the whole boundary of this service.</b> It validates the SHAPE
- * of a key and nothing about the value beside it: a mount specification, a published port, a group
- * id or a network alias is read by qits-platform-deployments' {@code ServiceExtras}, which stays the
- * single parser of those on the platform. Two parsers would be two opinions about what a deployment
- * means, and this one would be the copy that is never exercised by a real deployment.
+ * <p><b>The line this class draws is the whole boundary of this service, FOR ENTRY VALUES.</b> It
+ * validates the SHAPE of a key and nothing about the value beside it: a mount specification, a
+ * published port, a group id or a network alias is read by qits-platform-deployments' {@code
+ * ServiceExtras}, which stays the single parser of those on the platform. Two parsers would be two
+ * opinions about what a deployment means, and this one would be the copy that is never exercised by
+ * a real deployment.
+ *
+ * <p><b>THE DOCTRINE AMENDMENT.</b> That line is about the one document class this service used to
+ * see — a value somebody stored. There is a SECOND one now: {@code .config/qits/configuration.yml},
+ * the declaration an application makes about its own keys, which arrives here because there is
+ * nowhere else it could be answered from. This service is the ONE strict parser of THAT document
+ * ({@link DeclarationParser}) for the same reason qits-platform-deployments is the one parser of an
+ * extras value: whoever serves the typed read has to understand the type. Nothing about the
+ * amendment loosens the first line — a declared key's NAME still comes through {@link #requireKey}
+ * below, and a stored value is still never read.
  *
  * <p><b>Why the key is checked at all, then.</b> A key becomes half of a property name the deployer
  * layers into its own configuration ({@code qits.platform.deployments.extras.<app>.<key>}), and the
@@ -53,9 +63,30 @@ public final class ConfigurationKeys {
   private static final Pattern INDEXED_KEY =
       Pattern.compile("^(mounts|publishes|groups|aliases)\\[[0-9]{1,4}]$");
 
+  /**
+   * A declaration version — the tag or release version the document was published under.
+   *
+   * <p><b>Looser than every other name here, and deliberately so.</b> An env and an application are
+   * dns labels because they become network aliases; a version becomes nothing but a path segment and
+   * a lookup key, and it is not this service's to invent — it is whatever qits-ci released the
+   * application as ({@code 2026.907.135446}) or whatever tag the deployer holds. Refusing a spelling
+   * the pipeline already published would make this service the reason a real release cannot be
+   * declared, which is the one failure a declaration store must not have. What it still refuses is a
+   * value that is really a payload: a leading dot or dash, a slash, a space, anything that would let
+   * a version escape its path segment.
+   */
+  private static final Pattern DECLARATION_VERSION = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._-]*$");
+
+  /** The platform plane: one instance for every environment, reached at a bare wire alias. */
+  public static final String TARGET_PLATFORM = "platform";
+
+  /** The environment plane: one instance per tier, reached at {@code <env>-<application>}. */
+  public static final String TARGET_ENVIRONMENT = "environment";
+
   private static final int APPLICATION_MAX = 64;
   private static final int ENV_MAX = 64;
   private static final int KEY_MAX = 256;
+  private static final int DECLARATION_VERSION_MAX = 128;
 
   private ConfigurationKeys() {}
 
@@ -141,6 +172,63 @@ public final class ConfigurationKeys {
             + trimmed
             + ". A key is `env.<VAR>` or one of `mounts[i]`, `publishes[i]`, `groups[i]`,"
             + " `aliases[i]`.");
+  }
+
+  /** The declaration version, or a 400 naming the grammar it missed. */
+  public static String requireDeclarationVersion(String version) {
+    if (version == null || version.isBlank()) {
+      throw new BadRequestException("A declaration version is required");
+    }
+    String trimmed = version.trim();
+    if (trimmed.length() > DECLARATION_VERSION_MAX) {
+      throw new BadRequestException(
+          "The declaration version is longer than "
+              + DECLARATION_VERSION_MAX
+              + " characters: "
+              + trimmed);
+    }
+    if (!DECLARATION_VERSION.matcher(trimmed).matches()) {
+      throw new BadRequestException(
+          "Not a valid declaration version: "
+              + trimmed
+              + ". It must start with a letter or a digit and hold only letters, digits, dots,"
+              + " dashes and underscores.");
+    }
+    return trimmed;
+  }
+
+  /**
+   * The deployment target a declaration was seeded with, or a 400 naming the two words it may be.
+   *
+   * <p><b>It comes with the SEED and not out of the document</b>, which is the one thing worth
+   * saying twice. Which plane an application deploys onto is the deployer's fact, decided by {@code
+   * deployment_target} in its {@code .config/qits/deployments.yml} and known to the pipeline that
+   * is posting the declaration; an application asserting its own plane in a file this service reads
+   * would be a second answer to a question qits-platform-deployments already answers, and the two
+   * would diverge on the first plane move. So the intake takes it as a parameter and this service
+   * stores what it was told.
+   */
+  public static String requireDeploymentTarget(String target) {
+    if (target == null || target.isBlank()) {
+      throw new BadRequestException(
+          "A deploymentTarget is required. It is `"
+              + TARGET_PLATFORM
+              + "` or `"
+              + TARGET_ENVIRONMENT
+              + "`, and it is the deployer's fact rather than the document's.");
+    }
+    String trimmed = target.trim();
+    if (!TARGET_PLATFORM.equals(trimmed) && !TARGET_ENVIRONMENT.equals(trimmed)) {
+      throw new BadRequestException(
+          "Not a valid deploymentTarget: "
+              + trimmed
+              + ". It is `"
+              + TARGET_PLATFORM
+              + "` or `"
+              + TARGET_ENVIRONMENT
+              + "`.");
+    }
+    return trimmed;
   }
 
   /** The value, or a 400. Null is refused; the empty string is a value and is kept. */
