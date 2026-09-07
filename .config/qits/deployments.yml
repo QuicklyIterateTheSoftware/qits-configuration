@@ -5,15 +5,32 @@
 # decide whether this repository deploys — a library or an SPA carries none and its release is the
 # trunk push alone — and then promotes onto the branch it is configured with.
 #
-# ENVIRONMENT service: every environment runs its own instance, holding that environment's
-# configuration, and a green build deploys into whichever tier listens to the built branch. It is
-# not a platform service and must not become one: two tiers sharing one configuration store would
-# make an edit in dev an edit in prod.
+# PLATFORM service: ONE instance, holding EVERY environment's configuration side by side.
+#
+# This file used to argue the opposite — that two tiers sharing one configuration store would make
+# an edit in dev an edit in prod — and that argument was about a schema, not about a plane. An entry
+# was (application, key) then, so the only thing separating dev's value from prod's was which
+# process you happened to be talking to, and one store really would have been one value. An entry is
+# (env, application, key) now: the unique constraint says so, env is a path segment on every route,
+# and an edit names the environment it edits. The separation moved from the deployment into the key,
+# where it can be seen in a diff.
+#
+# WHAT THE SHARED STORE BUYS, and it is not tidiness. Cross-env tracing: "what does prod set that
+# dev does not" is a query against one database rather than two browser tabs and a person comparing
+# by eye. Free defaults for a joining environment: a new tier starts from what its siblings already
+# say instead of from an empty table nobody remembers how to fill. And one deployment of the service
+# every other deployment on the platform waits for — the deployer's resolved read now has one
+# address rather than one per tier.
+#
+# THE ROLLOUT COUPLING is real and belongs in the same breath: V2 backfills the env column from
+# QITS_CONFIGURATION_LEGACY_ENV, which ships with no default. The platform instance must be handed
+# that variable before it boots, or migrate-at-start refuses and the deployment fails at Flyway.
+# That refusal is the design and not an accident — see META-INF/microprofile-config.properties.
 #
 # `deployment_target` is written out here rather than left to its default because this is the one
 # key a reader of this file will want to check first, and the answer is a decision rather than an
 # omission.
-deployment_target: environment
+deployment_target: platform
 
 # WHAT THIS REPOSITORY DEPLOYS AS, held still across the repository rename. The repository is
 # qits-configuration-service now; the application is still qits-configuration, so nothing that is
