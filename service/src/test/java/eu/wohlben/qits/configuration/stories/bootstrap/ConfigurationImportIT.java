@@ -349,12 +349,30 @@ public class ConfigurationImportIT {
         .as("nothing-written");
   }
 
+  /**
+   * How many entries the listing credits an application with, across every env it names.
+   *
+   * <p><b>The listing is per env now</b> — an application row carries {@code envs[]}, each with its
+   * own count and head revision, because on a platform instance the useful form of "how is this
+   * application configured" is comparative. This story's file is imported into ONE env, so the sum is
+   * that env's count and the claim the assertions make is the one they always made. Summing rather
+   * than naming the env keeps the story out of the business of which tier the transitional env-less
+   * import writes into.
+   */
   private static int entryCountOf(List<Map<String, Object>> applications, String name) {
     return applications.stream()
         .filter(application -> name.equals(application.get("application")))
-        .map(application -> ((Number) application.get("entries")).intValue())
+        .map(ConfigurationImportIT::entriesAcrossEnvs)
         .findFirst()
         .orElse(-1);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static int entriesAcrossEnvs(Map<String, Object> application) {
+    return ((List<Map<String, Object>>) application.get("envs"))
+        .stream()
+            .mapToInt(env -> ((Number) env.get("entries")).intValue())
+            .sum();
   }
 
   @AfterAll

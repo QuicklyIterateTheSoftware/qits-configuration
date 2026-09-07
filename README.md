@@ -20,13 +20,20 @@ configuration into a deployment: the deployer *reads*, with its own machine iden
 Two tables, and the second is the authority.
 
     configuration_revision   append-only. Every write that changes something adds exactly one row:
-                             (application, key, value, deleted, seq, updatedBy, updatedAt).
-    configuration_entry      the read-optimised HEAD. One row per (application, key) that currently
-                             has a value, naming the revision it came from.
+                             (env, application, key, value, deleted, seq, updatedBy, updatedAt).
+    configuration_entry      the read-optimised HEAD. One row per (env, application, key) that
+                             currently has a value, naming the revision it came from.
 
 The current state is reproducible from the log alone, which is what makes an accidental edit
 answerable rather than merely regrettable. A delete appends a revision and removes the head row, so
 the value that was removed is still readable.
+
+**An entry is addressed by (env, application, key).** This service runs on the platform plane and
+holds every environment's configuration in one store, so there is no "the" configuration of an
+application — there is dev's and there is prod's. What the old one-instance-per-tier deployment
+asserted is a column now, and every route that reaches a row names the env it means. The env-less
+spellings below survive the transition by supplying `qits.configuration.legacy-env`, the one property
+that also stamps the backfill, and they die with it.
 
 **An identical write appends nothing.** That is what makes a bootstrap free to re-import its file on
 every boot, and it keeps the history a record of changes rather than of runs.
@@ -98,40 +105,63 @@ can honestly make. There is no anonymous route.
 
 | route | what it answers |
 | --- | --- |
-| `GET /applications` | every configured application, with its entry count and head revision |
-| `GET /applications/{app}/resolved` | **the deployer's read** — `{headRevision, properties}`, the properties at their full `qits.platform.deployments.extras.<app>.<key>` names |
-| `GET /applications/{app}/entries` | the current entries |
-| `PUT /applications/{app}/entries/{key}` | set one value. 201 the first time, 200 after; an identical value writes no revision |
-| `DELETE /applications/{app}/entries/{key}` | remove one entry, keeping it in the history |
-| `GET /applications/{app}/history` | every revision, newest first |
-| `POST /import` | `text/plain`, an extras properties file whole. Idempotent; answers `{imported, unchanged, kept, ignored}` |
+| `GET /applications` | every configured application, with a row per env it is configured in — entry count and head revision each |
+| `GET /applications/{app}/envs/{env}/resolved?version=` | **the deployer's read** — `{headRevision, properties}`, the properties at their full `qits.platform.deployments.extras.<app>.<key>` names. With `?version=` it is **the overlay read**: that version's declaration merged underneath, defaults for keys nobody set, `serviceAddress` keys rendered for *this* env. Without it, exactly the entries — and never a 404 |
+| `GET /applications/{app}/envs/{env}/entries` | the current entries of that env, each flagged `orphaned` against the governing declaration |
+| `PUT /applications/{app}/envs/{env}/entries/{key}` | set one value. 201 the first time, 200 after; an identical value writes no revision |
+| `DELETE /applications/{app}/envs/{env}/entries/{key}` | remove one entry, keeping it in the history |
+| `GET /applications/{app}/envs/{env}/history` | every revision of that env, newest first |
+| `POST /import?env=` | `text/plain`, an extras properties file whole, into the env the caller names. Idempotent; answers `{imported, unchanged, kept, ignored}` |
 | `GET /pins` | the configured container-image versions — `{generatedAt, pins:[{image, version, application, key}]}` |
-| `GET /applications/{app}/envs/{env}/resolved?version=` | **the overlay read** — the same shape, with that version's declaration merged underneath: defaults for keys nobody set, `serviceAddress` keys rendered for *this* env. Without `?version=` it is exactly the entries, and never a 404 |
 | `POST /applications/{app}/declarations/{version}?deploymentTarget=` | `application/yaml`, the document raw. **`qits:system` + `MachineAuth`.** 201 new, 200 identical, 409 different-under-a-taken-version, 422 unreadable |
 | `DELETE /applications/{app}/declarations/{version}` | the tag-recovery door. **`qits:system` + `MachineAuth`.** 204; the previous version governs again |
 | `GET /applications/{app}/declarations` | every version declared, newest first, with the governing one flagged |
 | `GET /applications/{app}/declarations/{version}` | one declaration: the parsed keys **and** the document verbatim |
 
+**Every entry route has an env-less spelling too** — `/applications/{app}/resolved`, `/entries`,
+`/entries/{key}`, `/history`, and `POST /import` with no `?env=`. They delegate to the env-addressed
+ones with `qits.configuration.legacy-env` and exist for the callers that predate the plane flip; the
+deployer's per-deployment read is why they could not simply be replaced. They die in the cutover
+feature, and their javadoc says so. The declaration routes have no env spelling at all: a declaration
+is a fact about a build and is the same fact in every tier.
+
+The import takes its env from the caller because the file cannot carry one — the grammar is
+`extras.<application>.<key>` and has nowhere to put a tier — so the assertion is made once, for the
+whole file.
+
 The resolved read carries **complete property names** on purpose: a consumer layers the map as a
 configuration source verbatim, with no prefix to re-assemble and no second place for the deployer's
-namespace to be written down. That namespace has moved twice already.
+namespace to be written down. That namespace has moved twice already. **They carry no env**, and must
+not: the map is layered into one container's configuration, and that container is in exactly one
+environment — the one named in the path of the read.
 
 ### The pin report
 
-`GET /pins` answers one row per image→(application, key) mapping in `control/ImagePins` that
-currently has a stored version, ordered by image, then application, then key. An image appears twice
-when two applications start it — `qits/workspace` is a workspace and a refinement container — and a
-mapping with nothing stored is **omitted**, because an image nobody has released here has no version
-to name. An empty `pins` is an ordinary 200.
+`GET /pins` answers one row per image→(application, key) mapping that currently has a stored version,
+ordered by image, then application, then key. An image appears twice when two applications start it —
+`qits/workspace` is a workspace and a refinement container — and a mapping with nothing stored is
+**omitted**, because an image nobody has released here has no version to name. An empty `pins` is an
+ordinary 200.
 
-It is a projection of entries a caller could read one at a time; what it adds is **the map**, which
-lives in this service and nowhere else. **qits-artifacts' garbage collector reads it as a pin
+**The mappings come from two places and declarations win.** A `packageVersion` key in an
+application's own declaration says which package that key carries a version of, and every governing
+one of `type: docker` is a mapping; `control/ImagePins` is the residual list of pins still carried by
+hand for consumers that have not declared yet, and a row of it is dropped when a declaration names
+the same (application, key). A `binary` coordinate is a real declaration and stays out of this
+answer, which is about container images. The route reads the legacy env: qits-artifacts asks about a
+registry the whole platform shares, and per-env rows would be several answers to a question with one.
+
+It is a projection of entries a caller could read one at a time; what it adds is **the mapping**,
+which lives in this service and nowhere else. **qits-artifacts' garbage collector reads it as a pin
 source**: a configured version is one a container launch will pull *cold*, so the registry's own
 last-accessed record says nothing about it and deleting it is a workspace that will not start. An
-image outside the map is not launchable-by-configuration and needs no row.
+image nothing maps to is not launchable-by-configuration and needs no row.
 
-The same list is what `bus/SoftwareReleaseListener` matches a release against — one definition, so
-the pin mechanism and the pin report cannot disagree.
+`bus/SoftwareReleaseListener` matches an announced release against the same two sources through the
+same merge function, and writes the version into **every env this store knows about** — an entry is a
+per-env override with no default row beneath it, so an env a release does not reach starts its
+containers on the image's committed default. One definition of what is pinned, so the pin mechanism
+and the pin report cannot disagree.
 
 The framework's own paths sit under `/configuration/q` — `/configuration/q/health/ready` is what the
 deployer's health gate curls, and `/configuration/q/openapi` is the document.

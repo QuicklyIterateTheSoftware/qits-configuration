@@ -88,6 +88,17 @@ Three things about it that are decisions rather than details:
 nothing behind; a half-applied import would be worse than a failed one, because the operator would
 have to work out which half.
 
+**The bus consumer's READS are bracketed too, and that is the one exception to the line below.**
+`ConfigurationService.declaredPins` and `pinEnvs` open a transaction of their own because their only
+caller is `bus/SoftwareReleaseListener`, which is called inside the durable funnel's claiming
+transaction — and that transaction has already enlisted the **eventstream** datasource. Two non-XA
+datasources cannot both join one, so a query of this store from in there never gets a connection:
+`Unable to acquire JDBC Connection [Exception in association of connection to existing transaction]`,
+measured by `ImageReleasePinIT` on 2026-09-07 with every frame failing and the release owed forever.
+The writes always suspended the claim; the reads the match needs now do the same. Anything else this
+listener ever asks the store goes through a method on the service for the same reason — a repository
+call made from the listener would be inside the claim.
+
 **Every write is a `DbRetry.inNewTx` whose body ends with a `flush()`.** `inNewTx` owns the
 transaction boundary, which is the only way a retry can tell "the body threw, so it certainly never
 committed" from "the transaction manager reported it" — Narayana spells a lost commit and a real
@@ -398,7 +409,7 @@ else happened", which is most of what is worth knowing about a store:
 | `deployment` | the deployer's resolved read; an unconfigured application still deploys | `assertEdgeCount(2)` on the read — one request in, one **declared** jdbc store behind it, and `assertNoEdgesTo(qits-platform-idp)`: a bearer is judged on keys fetched at startup, so the idp is not on the critical path of every deployment |
 | `operator` | a value set and re-saved; an entry removed; a key outside the grammar refused | `assertOnlyEdgesFrom(<one person>)` — an edit is rows in this service's own store and is pushed nowhere |
 | `authorization` | anonymous; a signed-in reader; both identity tracks at one door | `assertNoEdgesFrom(qits-configuration)` — a refusal is decided at the door, so no store is read on behalf of a caller about to be refused |
-| `release` | a released image becomes what the next container starts with | `assertEdgeCount(4)` however many times the story polled, and the one **outgoing** arrow in the catalogue that is not the idp |
+| `release` | a released image becomes what the next container starts with — including one image no list here names, matched by the declaration its pipeline published a moment earlier | `assertEdgeCount(6)` however many times the story polled, and the one **outgoing** arrow in the catalogue that is not the idp |
 
 The declared jdbc edge is the honest answer to "what does this service call out to": its own
 postgres, and nothing else, while it serves the read every deployment on the platform waits for.

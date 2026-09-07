@@ -37,16 +37,4 @@ public class InstanceEnv {
   public String legacyEnv() {
     return configured;
   }
-
-  /**
-   * A fixed instance, for the two collaborators that are constructed by hand rather than by the
-   * container — {@code bus/SoftwareReleaseListener}'s unit test being the one today. It exists so
-   * that test can stay a plain JUnit test: a {@code @QuarkusTest} would boot the whole application to
-   * prove a match rule that touches no database at all.
-   */
-  public static InstanceEnv fixed(String env) {
-    InstanceEnv instance = new InstanceEnv();
-    instance.configured = env;
-    return instance;
-  }
 }

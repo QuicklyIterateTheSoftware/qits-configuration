@@ -69,4 +69,13 @@ public final class StoryTarget {
   public static String historyPath(String application) {
     return applicationPath(application) + "/history";
   }
+
+  /**
+   * One version's declaration — the document an application publishes about its own keys. {@code
+   * POST} takes it in ({@code qits:system} plus {@code MachineAuth}, because it records an asserted
+   * fact about a build), {@code GET} reads it back.
+   */
+  public static String declarationPath(String application, String version) {
+    return applicationPath(application) + "/declarations/" + version;
+  }
 }

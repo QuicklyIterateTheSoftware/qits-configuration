@@ -6,43 +6,81 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.configuration.control.ConfigurationService;
-import eu.wohlben.qits.configuration.control.InstanceEnv;
+import eu.wohlben.qits.configuration.control.ImagePins;
 import eu.wohlben.qits.configuration.entity.ConfigurationEntry;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
  * The listener's decision, in isolation from the bus and the database. A {@link CapturingService}
- * stands in for the write seam and records what {@link SoftwareReleaseListener#onFrame} asks of it,
- * so the test is about the match rule alone — a {@code @QuarkusTest} would prove the same thing
- * behind a Quarkus boot it does not need.
+ * stands in for the store — the declared half of the match, the envs to fan out over, and the write
+ * seam — and records what {@link SoftwareReleaseListener#onFrame} asks of it, so the test is about
+ * the match rule alone; a {@code @QuarkusTest} would prove the same thing behind a Quarkus boot it
+ * does not need.
  *
- * <p><b>The env is asserted on every write</b>, and it is {@link #LEGACY_ENV}. A release says an
- * image version exists and nothing about which tiers should run it, so the pin goes where it went
- * before this service moved onto the platform plane — this instance's legacy env, handed to the
- * listener as a fixed {@link InstanceEnv} because a plain JUnit test has no container to inject one.
- * A later wave gives the listener a policy; until then "which env" is a constant and is pinned here
- * so that a generalisation cannot happen silently.
+ * <p><b>The merge is NOT stubbed.</b> {@link ImagePins#merge} is the real one, so the shadowing rule
+ * these tests assert is the same code {@code ConfigurationService.imagePins} reports through. A
+ * stand-in that decided which half won would be testing the test.
+ *
+ * <p><b>Every write's env is asserted</b>, because the fan-out is the half of this listener that
+ * changed: a pin is an entry, an entry is a per-env override with no default row under it, and an
+ * env the release does not reach starts its containers on the image's committed default instead.
+ * {@link CapturingService#envs} is what the store would have answered.
  */
 class SoftwareReleaseListenerTest {
 
-  /** The env every pin lands in for now — see the class javadoc. */
+  /** The env of a store that knows one — what {@code pinEnvs()} answers before a platform has tiers. */
   private static final String LEGACY_ENV = "test";
+
+  /** …and the second one, for the fan-out. */
+  private static final String OTHER_ENV = "prod";
+
+  private static final String ACTOR = "qits-configuration/software-release-listener";
+
+  private static final String VERSION = "2026.822.101500";
 
   /** One {@code upsert} as the seam received it. */
   private record Write(String env, String application, String key, String value, String actor) {}
 
   /**
-   * A {@link ConfigurationService} that writes nothing and remembers every call it was handed.
+   * A {@link ConfigurationService} that writes nothing, answers the declared half from a canned map,
+   * and remembers every call it was handed.
    *
-   * <p>Every call, not the last one: an image with two consumers is one frame and two upserts, and a
+   * <p>Every call, not the last one: one release is a write per (application, key) per env, and a
    * stand-in holding only the newest would let a listener that wrote one of them pass.
    */
   private static final class CapturingService extends ConfigurationService {
+
     final List<Write> writes = new ArrayList<>();
+
+    /** What the declarations table would answer, by {@code type + " " + name}. */
+    final Map<String, List<ImagePins.Pin>> declared = new LinkedHashMap<>();
+
+    /** What the store knows of, and it is asked rather than assumed. */
+    List<String> envs = List.of(LEGACY_ENV);
+
+    CapturingService declaring(
+        String packageType, String packageName, String application, String key) {
+      declared
+          .computeIfAbsent(packageType + " " + packageName, coordinate -> new ArrayList<>())
+          .add(new ImagePins.Pin(packageName, application, key));
+      return this;
+    }
+
+    @Override
+    public List<ImagePins.Pin> declaredPins(String packageType, String packageName) {
+      return declared.getOrDefault(packageType + " " + packageName, List.of());
+    }
+
+    @Override
+    public List<String> pinEnvs() {
+      return envs;
+    }
 
     @Override
     public ConfigurationEntry upsert(
@@ -61,45 +99,173 @@ class SoftwareReleaseListenerTest {
 
     /** The write that landed on an application, or null — the assertion for a fan-out frame. */
     Write on(String application) {
-      return writes.stream().filter(w -> w.application().equals(application)).findFirst().orElse(null);
+      return writes.stream()
+          .filter(write -> write.application().equals(application))
+          .findFirst()
+          .orElse(null);
+    }
+
+    /** Every write on one (application, key), whichever env it went to. */
+    List<Write> on(String application, String key) {
+      return writes.stream()
+          .filter(write -> write.application().equals(application) && write.key().equals(key))
+          .toList();
     }
   }
 
   private static EventFrame frameFor(String packageType, String packageName, String version) {
-    String payload =
-        "{\"repository\":\"qits-projects\",\"version\":\""
-            + version
-            + "\",\"packageType\":\""
-            + packageType
-            + "\",\"packageName\":\""
-            + packageName
-            + "\"}";
+    return frameCarrying(
+        "{\"repository\":\"qits-projects\",\"version\":"
+            + json(version)
+            + ",\"packageType\":"
+            + json(packageType)
+            + ",\"packageName\":"
+            + json(packageName)
+            + "}");
+  }
+
+  private static EventFrame frameCarrying(String payload) {
     return new EventFrame(
         "evt-1", "SoftwareRelease", Instant.parse("2026-08-22T10:00:00Z"), payload, null, null, null);
+  }
+
+  private static String json(String value) {
+    return value == null ? "null" : "\"" + value + "\"";
   }
 
   private SoftwareReleaseListener listenerWith(CapturingService service) {
     SoftwareReleaseListener listener = new SoftwareReleaseListener();
     listener.configuration = service;
-    listener.instanceEnv = InstanceEnv.fixed(LEGACY_ENV);
     return listener;
   }
 
-  @Test
-  void projectAgentImageReleaseWritesThePin() {
-    CapturingService service = new CapturingService();
-    SoftwareReleaseListener listener = listenerWith(service);
-    EventFrame frame = frameFor("docker", "qits/project-agent", "2026.822.101500");
+  // ------------------------------------------------------------ the declared half
 
-    assertTrue(listener.selects(frame), "the project-agent docker image must be selected");
+  /**
+   * THE MATCH THE APPLICATIONS MAKE THEMSELVES: an application declared a {@code packageVersion} key
+   * naming this image, and a release of it lands on that key with nothing written down in {@link
+   * ImagePins}. This is the path every consumer moves onto, and the authored list is what is left
+   * over until they all have.
+   */
+  @Test
+  void aDeclaredDockerCoordinateIsPinnedWithNothingAuthored() {
+    CapturingService service =
+        new CapturingService().declaring("docker", "qits/stt", "qits-stt", "env.QITS_STT_VERSION");
+    SoftwareReleaseListener listener = listenerWith(service);
+    EventFrame frame = frameFor("docker", "qits/stt", VERSION);
+
+    assertTrue(listener.selects(frame), "a well-formed release is claimed and decided inside");
     listener.onFrame(frame);
 
     Write write = service.only();
-    assertEquals(LEGACY_ENV, write.env(), "the pin lands in this instance's legacy env");
+    assertEquals(LEGACY_ENV, write.env());
+    assertEquals("qits-stt", write.application());
+    assertEquals("env.QITS_STT_VERSION", write.key());
+    assertEquals(VERSION, write.value());
+    assertEquals(ACTOR, write.actor());
+  }
+
+  /**
+   * A declared coordinate is NOT gated on docker, and this is the case that says so: the declaration
+   * named its own package type, so a {@code binary} release matches by the same two strings. The gate
+   * belongs to the authored list alone, whose rows are images by construction — see {@link
+   * #aNonDockerReleaseNeverMovesAnAuthoredPin}, which is the other side of the same coin.
+   */
+  @Test
+  void aDeclaredCoordinateOfAnotherPackageTypeIsPinnedToo() {
+    CapturingService service =
+        new CapturingService()
+            .declaring("binary", "qits-agent-cli", "qits-projects", "env.QITS_AGENT_CLI_VERSION");
+    SoftwareReleaseListener listener = listenerWith(service);
+    EventFrame frame = frameFor("binary", "qits-agent-cli", VERSION);
+
+    assertTrue(listener.selects(frame));
+    listener.onFrame(frame);
+
+    Write write = service.only();
+    assertEquals("qits-projects", write.application());
+    assertEquals("env.QITS_AGENT_CLI_VERSION", write.key());
+    assertEquals(VERSION, write.value());
+  }
+
+  /**
+   * THE HALF-ADOPTED CONSUMER, which is the state every consumer passes through: qits-workspaces has
+   * declared the key the workspace image moves, and qits-projects — which starts a refinement
+   * container from the same image — has not. So one release writes both pairs and writes each of them
+   * ONCE: the declaration shadows the authored row holding its pair rather than adding a second write
+   * of the same entry, and the authored row nobody has declared survives untouched.
+   */
+  @Test
+  void aDeclarationShadowsTheAuthoredPinForItsOwnPairAndOnlyThatOne() {
+    CapturingService service =
+        new CapturingService()
+            .declaring(
+                "docker", "qits/workspace", "qits-workspaces", "env.QITS_WORKSPACE_IMAGE_VERSION");
+    SoftwareReleaseListener listener = listenerWith(service);
+    EventFrame frame = frameFor("docker", "qits/workspace", VERSION);
+
+    listener.onFrame(frame);
+
+    assertEquals(
+        2,
+        service.writes.size(),
+        "the declared pair and the authored one, each written once — a declaration replaces the"
+            + " authored row for its pair rather than joining it");
+    assertEquals(
+        1,
+        service.on("qits-workspaces", "env.QITS_WORKSPACE_IMAGE_VERSION").size(),
+        "the pair both halves name is one entry and one write");
+    assertEquals(
+        1,
+        service.on("qits-projects", "env.QITS_PROJECTS_REFINEMENT_IMAGE_VERSION").size(),
+        "the pair only the authored list names must not be lost to the other one being declared");
+  }
+
+  // ------------------------------------------------------------ the fan-out
+
+  /**
+   * ONE RELEASE, EVERY ENV. An entry is a per-env override with no default row beneath it, so an env
+   * this store knows about and the release does not reach is an env whose containers start on the
+   * image's committed default — silently, and differently from its siblings.
+   */
+  @Test
+  void aPinIsWrittenIntoEveryEnvTheStoreKnowsAbout() {
+    CapturingService service = new CapturingService();
+    service.envs = List.of(LEGACY_ENV, OTHER_ENV);
+    SoftwareReleaseListener listener = listenerWith(service);
+    EventFrame frame = frameFor("docker", "qits/project-agent", VERSION);
+
+    listener.onFrame(frame);
+
+    List<Write> written =
+        service.on("qits-projects", "env.QITS_PROJECTS_AGENT_IMAGE_VERSION");
+    assertEquals(2, written.size(), "one pin, one write per env");
+    assertEquals(
+        List.of(LEGACY_ENV, OTHER_ENV),
+        written.stream().map(Write::env).toList(),
+        "every env the store named, in the order it named them");
+    assertTrue(
+        written.stream().allMatch(write -> VERSION.equals(write.value())),
+        "the same released version in each of them — a fan-out is not a promotion policy");
+  }
+
+  // ------------------------------------------------------------ the authored residual
+
+  @Test
+  void anImageNobodyHasDeclaredStillFollowsTheAuthoredList() {
+    CapturingService service = new CapturingService();
+    SoftwareReleaseListener listener = listenerWith(service);
+    EventFrame frame = frameFor("docker", "qits/project-agent", VERSION);
+
+    assertTrue(listener.selects(frame), "the project-agent docker image must be acted on");
+    listener.onFrame(frame);
+
+    Write write = service.only();
+    assertEquals(LEGACY_ENV, write.env());
     assertEquals("qits-projects", write.application());
     assertEquals("env.QITS_PROJECTS_AGENT_IMAGE_VERSION", write.key());
-    assertEquals("2026.822.101500", write.value());
-    assertEquals("qits-configuration/software-release-listener", write.actor());
+    assertEquals(VERSION, write.value());
+    assertEquals(ACTOR, write.actor());
   }
 
   /**
@@ -113,9 +279,9 @@ class SoftwareReleaseListenerTest {
   void workspaceImageReleaseWritesBothPins() {
     CapturingService service = new CapturingService();
     SoftwareReleaseListener listener = listenerWith(service);
-    EventFrame frame = frameFor("docker", "qits/workspace", "2026.822.101500");
+    EventFrame frame = frameFor("docker", "qits/workspace", VERSION);
 
-    assertTrue(listener.selects(frame), "the workspace docker image must be selected");
+    assertTrue(listener.selects(frame));
     listener.onFrame(frame);
 
     assertEquals(2, service.writes.size(), "the workspace image moves two pins, not one");
@@ -124,64 +290,113 @@ class SoftwareReleaseListenerTest {
     assertNotNull(workspaces, "the application that starts a workspace must be pinned");
     assertEquals(LEGACY_ENV, workspaces.env());
     assertEquals("env.QITS_WORKSPACE_IMAGE_VERSION", workspaces.key());
-    assertEquals("2026.822.101500", workspaces.value());
-    assertEquals("qits-configuration/software-release-listener", workspaces.actor());
+    assertEquals(VERSION, workspaces.value());
 
     Write projects = service.on("qits-projects");
     assertNotNull(projects, "the application that starts a refinement container must be pinned too");
     // The env override of qits.projects.refinement-image-version, which
     // refinementhost/RefinementContainerFactory reads to compose the image it starts.
-    assertEquals(LEGACY_ENV, projects.env());
     assertEquals("env.QITS_PROJECTS_REFINEMENT_IMAGE_VERSION", projects.key());
-    assertEquals("2026.822.101500", projects.value());
-    assertEquals("qits-configuration/software-release-listener", projects.actor());
+    assertEquals(VERSION, projects.value());
   }
 
   /**
    * The editor image lands on the same application as the workspace image, under a key of its own —
    * and its name opens with the workspace image's, so this is also the assertion that the match is a
-   * whole-name lookup rather than a prefix. The single write is the sharper half of that now that the
-   * workspace image writes two: a prefix match would give the editor release the workspace's pins.
+   * whole-name lookup rather than a prefix. The single write is the sharper half of that: a prefix
+   * match would give the editor release the workspace's pins.
    */
   @Test
   void workspaceEditorImageReleaseWritesTheEditorPin() {
     CapturingService service = new CapturingService();
     SoftwareReleaseListener listener = listenerWith(service);
-    EventFrame frame = frameFor("docker", "qits/workspace-editor", "2026.822.101500");
+    EventFrame frame = frameFor("docker", "qits/workspace-editor", VERSION);
 
-    assertTrue(listener.selects(frame), "the workspace-editor docker image must be selected");
     listener.onFrame(frame);
 
     Write write = service.only();
-    assertEquals(LEGACY_ENV, write.env(), "the pin lands in this instance's legacy env");
     assertEquals("qits-workspaces", write.application());
     assertEquals("env.QITS_EDITOR_IMAGE_VERSION", write.key());
-    assertEquals("2026.822.101500", write.value());
-    assertEquals("qits-configuration/software-release-listener", write.actor());
+    assertEquals(VERSION, write.value());
   }
 
+  // ------------------------------------------------------------ what moves nothing
+
+  /**
+   * A release nothing declares and nothing pins is CLAIMED and then does nothing, which is the price
+   * of the predicate no longer being able to ask the store — see {@link
+   * SoftwareReleaseListener#selects}. What matters is the effect, and the effect is no write.
+   */
   @Test
-  void aDifferentImageNameWritesNothing() {
+  void aPackageNobodyDeclaresOrPinsWritesNothing() {
     CapturingService service = new CapturingService();
     SoftwareReleaseListener listener = listenerWith(service);
-    EventFrame frame = frameFor("docker", "qits/qits-stt", "2026.822.101500");
+    EventFrame frame = frameFor("docker", "qits/qits-stt", VERSION);
 
-    assertFalse(listener.selects(frame), "another image must not be selected");
+    assertTrue(listener.selects(frame), "a well-formed release is decided inside the claim now");
     listener.onFrame(frame);
 
-    assertEquals(List.of(), service.writes, "no entry is written for another image");
+    assertEquals(List.of(), service.writes, "no entry is written for a package nothing wants");
   }
 
+  /**
+   * Same name, wrong type: the maven artifact of a repository that also publishes an image must not
+   * move the image's pin — a version written from a jar's release would start containers on a tag
+   * that does not exist. Nothing declares this coordinate, and the authored list is images only.
+   */
   @Test
-  void aNonDockerPackageTypeWritesNothing() {
+  void aNonDockerReleaseNeverMovesAnAuthoredPin() {
     CapturingService service = new CapturingService();
     SoftwareReleaseListener listener = listenerWith(service);
-    // Same name, wrong type: a maven artifact that happens to share the coordinate must not match.
-    EventFrame frame = frameFor("maven", "qits/project-agent", "2026.822.101500");
+    EventFrame frame = frameFor("maven", "qits/project-agent", VERSION);
 
-    assertFalse(listener.selects(frame), "a non-docker type must not be selected");
     listener.onFrame(frame);
 
     assertEquals(List.of(), service.writes, "no entry is written for a non-docker release");
+  }
+
+  // ------------------------------------------------------------ poison
+
+  @Test
+  void aReleaseNamingNoVersionIsSettledRatherThanClaimed() {
+    CapturingService service = new CapturingService();
+    SoftwareReleaseListener listener = listenerWith(service);
+    EventFrame frame = frameFor("docker", "qits/project-agent", "  ");
+
+    assertFalse(
+        listener.selects(frame),
+        "the same bytes decide the same way forever, so it is settled rather than owed");
+    listener.onFrame(frame);
+
+    assertEquals(List.of(), service.writes, "there is nothing to pin");
+  }
+
+  @Test
+  void aReleaseNamingNoPackageIsSettledRatherThanClaimed() {
+    CapturingService service = new CapturingService();
+    SoftwareReleaseListener listener = listenerWith(service);
+    EventFrame frame = frameFor("docker", null, VERSION);
+
+    assertFalse(listener.selects(frame), "there is nothing to match a declaration against");
+    listener.onFrame(frame);
+
+    assertEquals(List.of(), service.writes);
+  }
+
+  /**
+   * An unreadable payload answers NO rather than throwing: a predicate that throws is a failure
+   * rather than a "no", and the seam keeps offering an event whose predicate throws — which is wrong
+   * for one that will read the same bytes and fail identically forever.
+   */
+  @Test
+  void anUnreadablePayloadIsSettledRatherThanThrown() {
+    CapturingService service = new CapturingService();
+    SoftwareReleaseListener listener = listenerWith(service);
+    EventFrame frame = frameCarrying("this is not json");
+
+    assertFalse(listener.selects(frame));
+    listener.onFrame(frame);
+
+    assertEquals(List.of(), service.writes);
   }
 }

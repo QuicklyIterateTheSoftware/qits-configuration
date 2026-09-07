@@ -24,6 +24,9 @@ import eu.wohlben.qits.userflows.report.ReportAssertions;
 import eu.wohlben.qits.userflows.report.UserflowReport;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.config.EncoderConfig;
+import io.restassured.config.RestAssuredConfig;
+import io.restassured.http.ContentType;
 import io.restassured.path.json.JsonPath;
 import java.time.Duration;
 import java.util.List;
@@ -56,13 +59,20 @@ import org.junit.jupiter.api.TestMethodOrder;
  * The edge in the diagram is therefore {@code qits-configuration -> qits-events}, and it is the only
  * outgoing HTTP arrow in this whole catalogue that is not the startup fetch of the idp's keys.
  *
- * <p><b>And one of the four frames is deliberately ignored.</b> A {@code SoftwareRelease} is acted
- * on only when its {@code packageType} is {@code docker} and its {@code packageName} is an image
- * this service pins. The maven release of the same repository, published moments later and carrying
- * a much higher version, must not touch the pin — a version this service wrote from a jar's release
- * would start containers on an image tag that does not exist. It is ordered <b>before</b> the
- * project-agent frame on purpose: when the second pin appears, the frame between them has provably
- * been offered and skipped.
+ * <p><b>And one of the five frames is deliberately ignored.</b> A {@code SoftwareRelease} is acted
+ * on only when some application declared its coordinate or {@code control/ImagePins} names the image.
+ * The maven release of the same repository, published moments later and carrying a much higher
+ * version, must not touch the pin — a version this service wrote from a jar's release would start
+ * containers on an image tag that does not exist. It is ordered <b>before</b> the project-agent frame
+ * on purpose: when the second pin appears, the frame between them has provably been offered and
+ * skipped.
+ *
+ * <p><b>The last frame is the one nothing here was ever told about.</b> {@code qits/story-declared}
+ * is in no list in this repository; it is pinned because the application declared the key itself and
+ * the pipeline published that document a moment before announcing the release. That is the direction
+ * the platform is moving in — a consumer arrives with its own statement of what it needs — and this
+ * is the story that walks it end to end, over the same bus and into the same entry with the same
+ * revision.
  *
  * <p>The far side is {@code stories.support.StoryEventBus}, which serves the log's list route and
  * records what was read — see it for why an empty poll is not an arrow.
@@ -110,6 +120,48 @@ public class ImageReleasePinIT {
   /** The version the maven release carries, and which must never reach a pin. */
   static final String MAVEN_VERSION = "9999.1.1";
 
+  /**
+   * THE APPLICATION THAT ASKS FOR ITSELF: it declares a {@code packageVersion} key naming its own
+   * image, and there is no row for it in {@code control/ImagePins} — which is the point.
+   */
+  static final String DECLARING = "story-declaring-app";
+
+  /** The tag its declaration is published under. A literal, like every name in this catalogue. */
+  static final String DECLARED_TAG = "1.0";
+
+  /** The image that declaration names, and the key it carries the version of. */
+  static final String DECLARED_IMAGE = "qits/story-declared";
+
+  static final String DECLARED_IMAGE_KEY = "env.QITS_STORY_DECLARED_IMAGE_VERSION";
+
+  static final String DECLARED_VERSION = "2026.829.112000";
+
+  /** Who publishes a declaration: the pipeline that built the release, with a machine identity. */
+  static final String PIPELINE = "qits-ci";
+
+  /** The document, in the grammar `control/DeclarationParser` is the estate's one parser of. */
+  static final String DECLARATION =
+      """
+      keys:
+        env.QITS_STORY_DECLARED_IMAGE_VERSION:
+          type: packageVersion
+          description: the image a story-declaring container starts from
+          package:
+            type: docker
+            name: qits/story-declared
+      """;
+
+  private static final String YAML = "application/yaml";
+
+  /**
+   * RestAssured ships no encoder for {@code application/yaml} and refuses a body it cannot encode, so
+   * it is told to encode that type as text — the same line {@code DeclarationsApiTest} carries. The
+   * request still sends the content type the shipped {@code @Consumes} names, which is the point.
+   */
+  private static final RestAssuredConfig YAML_AS_TEXT =
+      RestAssuredConfig.config()
+          .encoderConfig(EncoderConfig.encoderConfig().encodeContentTypeAs(YAML, ContentType.TEXT));
+
   /** Who the listener records as the writer — a machine, and it says which one. */
   static final String LISTENER_ACTOR = "qits-configuration/software-release-listener";
 
@@ -148,7 +200,16 @@ public class ImageReleasePinIT {
       reads it through the same resolved read every other extra comes through, and starts its
       containers on the image that was just released.
 
-      Four releases arrive together and only three are pins, but three pinned images are four
+      Which key a released image moves is answered twice over, and the first answer is the
+      application's own. Before it announces the release, the pipeline publishes what the application
+      declares — one packageVersion key, naming the image it starts from — and that document is what
+      the listener matches the release against. Nothing in this service's own list mentions that
+      image, and nothing has to: a consumer joins the platform by saying what it needs, not by
+      somebody remembering to add a mapping here. The hand-maintained list is what is left over for
+      the applications that have not declared yet, and a declaration wins wherever both name the same
+      key.
+
+      Five releases arrive together and only four are pins, but four pinned images are five
       entries. The workspace image and the editor image both land on qits-workspaces, each under its
       own env key (env.QITS_WORKSPACE_IMAGE_VERSION and env.QITS_EDITOR_IMAGE_VERSION), and the
       project agent's lands on qits-projects. The workspace image lands on qits-projects too, as
@@ -172,6 +233,26 @@ public class ImageReleasePinIT {
   void aReleasedImageIsPinnedForTheNextDeployment(Interactions story) {
     NetworkCapture.actor(DEPLOYER);
     deployerBearer = StoryIdentities.platformToken(DEPLOYER);
+
+    // THE DECLARATION COMES FIRST, and the order is the story rather than the setup. A release is
+    // matched against what applications have declared AT THE MOMENT IT IS CONSUMED, so a pipeline
+    // publishes the document its build produced and then announces the release — which is the order
+    // it does them in anyway, both being steps of the same run. A release consumed before its
+    // declaration landed would match nothing and be settled forever, and the next release is what
+    // repairs that.
+    NetworkCapture.actor(PIPELINE);
+    StoryIdentities.platformService(given(), PIPELINE)
+        .config(YAML_AS_TEXT)
+        .contentType(YAML)
+        .body(DECLARATION)
+        .when()
+        .post(StoryTarget.declarationPath(DECLARING, DECLARED_TAG) + "?deploymentTarget=environment")
+        .then()
+        .statusCode(201);
+    story
+        .note("the pipeline publishes what its application declares: one key, carrying a version of one image")
+        .as("declaration-published");
+    NetworkCapture.actor(DEPLOYER);
 
     StoryEventBus.arm(
         List.of(
@@ -206,9 +287,18 @@ public class ImageReleasePinIT {
                 WORKSPACES,
                 EDITOR_VERSION,
                 "docker",
-                "qits/workspace-editor")));
+                "qits/workspace-editor"),
+            // The image nothing in this service has ever been told about: it is matched by the
+            // declaration the pipeline just published and by nothing else.
+            StoryEventBus.softwareRelease(
+                "release-story-declared-image",
+                "2026-08-29T11:20:00Z",
+                DECLARING,
+                DECLARED_VERSION,
+                "docker",
+                DECLARED_IMAGE)));
     story
-        .note("qits-ci announces four releases: three docker images and one jar of the same repository")
+        .note("qits-ci announces five releases: four docker images and one jar of the same repository")
         .as("releases-announced");
 
     assertEquals(
@@ -256,6 +346,17 @@ public class ImageReleasePinIT {
     story
         .note("the jar release of the same repository moved nothing: a pin is keyed on the image")
         .as("maven-release-ignored");
+
+    // THE HALF THIS SERVICE WAS NEVER TOLD ABOUT. Nothing in control/ImagePins names
+    // qits/story-declared; the only reason this release lands anywhere is the document the pipeline
+    // published above, which said that this key on this application carries a version of that image.
+    assertEquals(
+        DECLARED_VERSION,
+        awaitPin(DECLARING, DECLARED_IMAGE_KEY),
+        "an application that declared the coordinate must be pinned with nothing written down here");
+    story
+        .note("the image only the application itself declared is pinned too — a new consumer needs no edit to this service")
+        .as("declared-image-pinned");
 
     List<Map<String, Object>> revisions =
         StoryIdentities.platformService(given(), DEPLOYER)
@@ -333,6 +434,8 @@ public class ImageReleasePinIT {
     ReportAssertions.assertStepId(CATEGORY, PINNED_SLUG, "editor-image-pinned");
     ReportAssertions.assertStepId(CATEGORY, PINNED_SLUG, "refinement-image-pinned");
     ReportAssertions.assertStepId(CATEGORY, PINNED_SLUG, "maven-release-ignored");
+    ReportAssertions.assertStepId(CATEGORY, PINNED_SLUG, "declaration-published");
+    ReportAssertions.assertStepId(CATEGORY, PINNED_SLUG, "declared-image-pinned");
     ReportAssertions.assertStepId(CATEGORY, PINNED_SLUG, "pin-attributed");
 
     // THE ONE OUTGOING ARROW. This service pages the platform's event log forward from its own
@@ -365,11 +468,29 @@ public class ImageReleasePinIT {
         DEPLOYER,
         StoryTarget.SERVICE,
         "GET " + StoryTarget.historyPath(WORKSPACES) + " -> 200");
-    // Four arrows and no fifth, however many times the story polled: the two reads it waited on,
-    // the history it checked, and the one page of the log that carried the releases.
-    ReportAssertions.assertEdgeCount(CATEGORY, PINNED_SLUG, 4);
+    ReportAssertions.assertEdge(
+        CATEGORY,
+        PINNED_SLUG,
+        NetworkEdge.HTTP,
+        DEPLOYER,
+        StoryTarget.SERVICE,
+        "GET " + StoryTarget.resolvedPath(DECLARING) + " -> 200");
+    // The only arrow in this story that is not a read: a machine asserting what its build declares.
+    // The query the request carried (?deploymentTarget=) is not in the label — the tap draws paths.
+    ReportAssertions.assertEdge(
+        CATEGORY,
+        PINNED_SLUG,
+        NetworkEdge.HTTP,
+        PIPELINE,
+        StoryTarget.SERVICE,
+        "POST " + StoryTarget.declarationPath(DECLARING, DECLARED_TAG) + " -> 201");
+    // Six arrows and no seventh, however many times the story polled: the three reads it waited on,
+    // the history it checked, the declaration the pipeline published, and the one page of the log
+    // that carried the releases. Two actors, because a declaration is a machine's assertion about a
+    // build and a resolved read is the deployer's — no person is on this path at all.
+    ReportAssertions.assertEdgeCount(CATEGORY, PINNED_SLUG, 6);
     ReportAssertions.assertOnlyEdgesFrom(
-        CATEGORY, PINNED_SLUG, List.of(DEPLOYER, StoryTarget.SERVICE));
+        CATEGORY, PINNED_SLUG, List.of(DEPLOYER, PIPELINE, StoryTarget.SERVICE));
     ReportAssertions.assertNotLeaked(CATEGORY, PINNED_SLUG, deployerBearer);
   }
 }

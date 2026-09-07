@@ -262,6 +262,26 @@ class ConfigurationServiceTest {
     assertTrue(entries.listDistinctEnvs().contains(ENV));
   }
 
+  /**
+   * WHERE A RELEASE LANDS: every env this store knows anything about, and the legacy env whether or
+   * not it knows anything about that one.
+   *
+   * <p>The floor is what keeps the fan-out additive. Before it, a pin went to the legacy env
+   * unconditionally; a store whose envs are read out of its own rows knows of none at all until
+   * something has been written, and the first release into a fresh platform would have written
+   * nowhere.
+   */
+  @Test
+  void aReleaseFansOutOverEveryEnvTheStoreKnowsAndAlwaysTheLegacyOne() {
+    configuration.upsert("pin-env-probe", "app-pin-envs", "env.A", "one", "alice");
+
+    List<String> envs = configuration.pinEnvs();
+
+    assertTrue(envs.contains("pin-env-probe"), "an env with rows is an env a release reaches");
+    assertTrue(envs.contains(ENV), "and this instance's legacy env is in it by construction");
+    assertEquals(envs.stream().sorted().distinct().toList(), envs, "sorted, and each env once");
+  }
+
   @Test
   void theEnvGrammarIsEnforcedOnTheWritePath() {
     assertThrows(
@@ -334,21 +354,23 @@ class ConfigurationServiceTest {
    * The pin report, walked in one method on purpose: "nothing pinned is an empty answer" is a claim
    * about a store no pin has been written into, and this suite shares one database across classes —
    * so it is asserted before this test writes rather than from a second method that might run after
-   * it.
+   * it. <b>The declared half is walked in the same method for the same reason</b>: a declaration is
+   * store-wide state, and a second method posting one would decide this one's answer depending on
+   * which ran first.
    *
-   * <p>The application names here are the platform's real ones, because the map is a compile-time
-   * constant and there is no pin on an invented application to write. Nothing else in this module
-   * touches them.
+   * <p>The application names here are the platform's real ones, because the authored list is a
+   * compile-time constant and there is no pin on an invented application to write. Nothing else in
+   * this module touches them.
    */
   @Test
-  void thePinReportAnswersWhatIsStoredAndOmitsWhatWasNeverReleased() {
+  void thePinReportMergesWhatIsDeclaredWithWhatIsAuthoredAndOmitsWhatWasNeverReleased() {
     assertTrue(
         configuration.imagePins().isEmpty(),
         "an environment that has released nothing pins nothing — not four rows with no version");
 
-    configuration.upsert(ENV, 
+    configuration.upsert(ENV,
         "qits-projects", "env.QITS_PROJECTS_AGENT_IMAGE_VERSION", "2026.904.160152", "alice");
-    configuration.upsert(ENV, 
+    configuration.upsert(ENV,
         "qits-workspaces", "env.QITS_WORKSPACE_IMAGE_VERSION", "2026.904.160522", "alice");
 
     assertEquals(
@@ -366,6 +388,72 @@ class ConfigurationServiceTest {
         configuration.imagePins(),
         "the two unreleased mappings are omitted, and the refinement key of the workspace image is"
             + " one of them — the image is released, that entry is not written");
+
+    // A CONSUMER NOBODY HAS EVER WRITTEN A PIN FOR, arriving through its own declaration: an
+    // application says which image its version key carries, and the report answers for it with
+    // nothing added to ImagePins.
+    declare(
+        "app-declared-pin",
+        ConfigurationKeys.TARGET_ENVIRONMENT,
+        """
+        keys:
+          env.QITS_DECLARED_IMAGE_VERSION:
+            type: packageVersion
+            package: { type: docker, name: qits/declared }
+          env.QITS_DECLARED_BINARY_VERSION:
+            type: packageVersion
+            package: { type: binary, name: qits-declared-cli }
+        """);
+    configuration.upsert(
+        ENV, "app-declared-pin", "env.QITS_DECLARED_IMAGE_VERSION", "2026.905.1", "the-release");
+    configuration.upsert(
+        ENV, "app-declared-pin", "env.QITS_DECLARED_BINARY_VERSION", "2026.905.2", "the-release");
+
+    assertEquals(
+        List.of(
+            new ImagePinDto(
+                "qits/declared", "2026.905.1", "app-declared-pin", "env.QITS_DECLARED_IMAGE_VERSION"),
+            new ImagePinDto(
+                "qits/project-agent",
+                "2026.904.160152",
+                "qits-projects",
+                "env.QITS_PROJECTS_AGENT_IMAGE_VERSION"),
+            new ImagePinDto(
+                "qits/workspace",
+                "2026.904.160522",
+                "qits-workspaces",
+                "env.QITS_WORKSPACE_IMAGE_VERSION")),
+        configuration.imagePins(),
+        "the declared image joins the authored ones in the one order the contract names — and the"
+            + " binary coordinate stays out of a report about container images");
+
+    // AND A CONSUMER ADOPTING DECLARATIONS FOR A KEY THAT IS ALREADY AUTHORED: qits-projects now
+    // declares the agent key itself, naming a renamed image. The pair is written once, under the
+    // name its own application gave it.
+    declare(
+        "qits-projects",
+        ConfigurationKeys.TARGET_ENVIRONMENT,
+        """
+        keys:
+          env.QITS_PROJECTS_AGENT_IMAGE_VERSION:
+            type: packageVersion
+            package: { type: docker, name: qits/project-agent-next }
+        """);
+
+    List<ImagePinDto> shadowed = configuration.imagePins();
+    assertEquals(
+        3, shadowed.size(), "a declaration of an authored pair replaces its row rather than adding one");
+    assertTrue(
+        shadowed.contains(
+            new ImagePinDto(
+                "qits/project-agent-next",
+                "2026.904.160152",
+                "qits-projects",
+                "env.QITS_PROJECTS_AGENT_IMAGE_VERSION")),
+        "the image the application declares is the one the collector is told to protect");
+    assertTrue(
+        shadowed.stream().noneMatch(pin -> "qits/project-agent".equals(pin.image())),
+        "and the authored name it shadows is not reported beside it");
   }
 
   @Test

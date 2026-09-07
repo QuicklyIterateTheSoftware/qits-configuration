@@ -8,6 +8,8 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.oneOf;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.config.EncoderConfig;
+import io.restassured.config.RestAssuredConfig;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Test;
 
@@ -15,10 +17,15 @@ import org.junit.jupiter.api.Test;
  * The pin report over the wire — the answer qits-artifacts' collector holds against age when it
  * decides which images it may delete.
  *
- * <p>The applications and keys are the platform's real ones, because the map is a compile-time
- * constant: there is no pin on an application of this test's own to write. Nothing else in this
- * suite touches them, and both tests begin by writing all four values, so neither depends on the
- * order the class is run in — the omission test puts back what it removed.
+ * <p>The applications and keys are the platform's real ones, because the AUTHORED half of the map is
+ * a compile-time constant: there is no pin on an application of this test's own to write. Nothing
+ * else in this suite touches them, and every test begins by writing all four values, so none depends
+ * on the order the class is run in — the two that change the answer put back what they removed or
+ * added.
+ *
+ * <p>The DECLARED half needs no such apology: an application of this test's own declares a
+ * {@code packageVersion} key and the report answers for it, which is the whole point of the
+ * generalisation — a pin arrives with its consumer's own document instead of with an edit here.
  *
  * <p><b>No test sends an identity header</b>, as in {@code ConfigurationApiTest}: qits-auth-core
  * ships a {@code %test} dev user carrying {@code qits:admin} and {@code qits:system}, so the shipped
@@ -35,6 +42,26 @@ class ImagePinsApiTest {
   private static final String WORKSPACE_VERSION = "2026.904.160522";
 
   private static final String EDITOR_VERSION = "2026.904.100239";
+
+  /** The application of the declared half — this test's own, since a declaration is per application. */
+  private static final String DECLARED_APP = "pins-declaring-app";
+
+  private static final String DECLARED_VERSION = "2026.905.1";
+
+  private static final String DECLARED_KEY = "env.QITS_DECLARED_IMAGE_VERSION";
+
+  private static final String DECLARED_IMAGE_VERSION = "2026.905.113000";
+
+  private static final String YAML = "application/yaml";
+
+  /**
+   * RestAssured ships no encoder for {@code application/yaml}, so it is told to encode that type as
+   * text — the same line {@code DeclarationsApiTest} carries, and for the same reason: the
+   * alternative is posting a content type the shipped {@code @Consumes} does not name.
+   */
+  private static final RestAssuredConfig YAML_AS_TEXT =
+      RestAssuredConfig.config()
+          .encoderConfig(EncoderConfig.encoderConfig().encodeContentTypeAs(YAML, ContentType.TEXT));
 
   /** Every mapping of the map, written. Idempotent, so either test may run first. */
   private void pinEveryImage() {
@@ -114,5 +141,71 @@ class ImagePinsApiTest {
 
     // Put it back: the other test asserts all four, and the suite shares one database.
     put("qits-workspaces", "env.QITS_EDITOR_IMAGE_VERSION", EDITOR_VERSION);
+  }
+
+  /**
+   * A pin nobody wrote into {@code control/ImagePins}: the application declared the key itself, said
+   * which image its version is of, and the report answers for it. This is the path the authored list
+   * is being emptied into, and over the wire it is the same four fields.
+   *
+   * <p>It <b>takes its declaration and its entry away again</b> at the end, for the same reason the
+   * omission test puts back what it removed: this suite shares one database across classes, and the
+   * two tests above assert a size.
+   */
+  @Test
+  void anImageAnApplicationDeclaredForItselfIsAPinToo() {
+    pinEveryImage();
+
+    given()
+        .config(YAML_AS_TEXT)
+        .contentType(YAML)
+        .body(
+            """
+            keys:
+              env.QITS_DECLARED_IMAGE_VERSION:
+                type: packageVersion
+                package: { type: docker, name: qits/api-declared }
+            """)
+        .when()
+        .post(BASE + "/applications/" + DECLARED_APP + "/declarations/" + DECLARED_VERSION
+            + "?deploymentTarget=environment")
+        .then()
+        .statusCode(oneOf(200, 201));
+    put(DECLARED_APP, DECLARED_KEY, DECLARED_IMAGE_VERSION);
+
+    given()
+        .when()
+        .get(BASE + "/pins")
+        .then()
+        .statusCode(200)
+        .body("pins.size()", equalTo(5))
+        // qits/api-declared sorts ahead of every authored image, so the declared row is first — one
+        // order over the merged list, not the authored ones followed by the declared ones.
+        .body("pins[0].image", equalTo("qits/api-declared"))
+        .body("pins[0].version", equalTo(DECLARED_IMAGE_VERSION))
+        .body("pins[0].application", equalTo(DECLARED_APP))
+        .body("pins[0].key", equalTo(DECLARED_KEY))
+        .body("pins[1].image", equalTo("qits/project-agent"));
+
+    given()
+        .when()
+        .delete(BASE + "/applications/" + DECLARED_APP + "/declarations/" + DECLARED_VERSION)
+        .then()
+        .statusCode(204);
+    given()
+        .when()
+        .delete(BASE + "/applications/" + DECLARED_APP + "/entries/" + DECLARED_KEY)
+        .then()
+        .statusCode(204);
+
+    given()
+        .when()
+        .get(BASE + "/pins")
+        .then()
+        .statusCode(200)
+        .body("pins.size()", equalTo(4))
+        .body(
+            "pins.image",
+            everyItem(not(equalTo("qits/api-declared"))));
   }
 }

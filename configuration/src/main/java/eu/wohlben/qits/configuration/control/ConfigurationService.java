@@ -32,6 +32,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 
 /**
@@ -321,34 +322,120 @@ public class ConfigurationService {
   }
 
   /**
-   * THE PIN REPORT: every {@link ImagePins} mapping that currently has a stored version, in the
+   * EVERY (application, key) A RELEASE OF ONE PACKAGE MOVES, as the applications themselves declare
+   * it — the half of the match that is not written down in {@link ImagePins}.
+   *
+   * <p>Two narrowings and both are load-bearing. Only {@code packageVersion} keys are returned,
+   * because they are the only ones that carry a version at all. And only the keys of the GOVERNING
+   * declaration count: a superseded version's rows are still in the table — they are what a
+   * deployment that resolved against it is answerable by — and acting on them would have a release
+   * write a key an application stopped declaring two versions ago.
+   *
+   * <p><b>No docker gate here, deliberately.</b> The declaration names its own package type, so a
+   * {@code binary} coordinate is matched exactly as a docker one is and by the same string
+   * comparison. The gate belongs to {@link ImagePins#BY_IMAGE} alone, whose rows are images by
+   * construction and have no type to name.
+   *
+   * <p>One indexed query plus one governing read per application that declared the coordinate —
+   * which is one application in every case the platform has today, and grows with the consumers of a
+   * package rather than with the log.
+   *
+   * <p><b>IT OPENS A TRANSACTION OF ITS OWN, unlike every other read here, and the reason is its one
+   * caller.</b> {@code bus/SoftwareReleaseListener} is asked this from inside the durable funnel's
+   * claiming transaction, which has already enlisted the EVENTSTREAM datasource to write the claim —
+   * and two non-XA datasources cannot both join one transaction. Reading this store from in there
+   * dies with {@code Unable to acquire JDBC Connection [Exception in association of connection to
+   * existing transaction]}, which is measured rather than reasoned about: it is what {@code
+   * ImageReleasePinIT} answered on 2026-09-07, on every frame, with the claim rolled back and the
+   * release owed forever. So the read suspends the claim exactly as the pin's write always has.
+   */
+  public List<ImagePins.Pin> declaredPins(String packageType, String packageName) {
+    return DbRetry.inNewTx(
+        "read who declares " + packageType + " " + packageName,
+        () -> governingPins(declaredKeys.listByPackage(packageType, packageName)));
+  }
+
+  /**
+   * Every env a value the platform writes ITSELF has to reach: every env this store knows anything
+   * about, plus this instance's legacy env.
+   *
+   * <p><b>An entry is a per-env override and there is no default row to write</b>, so a pin that is
+   * not written into an env is not "inherited" there — it is absent, and the container starts on
+   * whatever its image's committed default says. That is why a release fans out over every env
+   * rather than landing in one: the alternative is a platform where dev runs the version CI just
+   * built and prod runs whatever was current the day it was configured, with nothing saying so.
+   *
+   * <p><b>The legacy env is in the set unconditionally</b>, and that is what keeps this change
+   * additive. It is the one env this instance is certain of — the env its inherited rows were
+   * stamped with and the one its env-less callers mean — and before the fan-out it was the only env
+   * a pin was ever written into. A store that has not been bootstrapped yet knows of no env at all,
+   * and without the floor the first release into a fresh platform would write nothing anywhere. It
+   * leaves with {@link InstanceEnv}, at which point the fan-out is exactly what the store knows.
+   *
+   * <p><b>The accepted residual: an env born AFTER a release has no row until the next one.</b>
+   * Nothing backfills, because a backfill would be this service deciding that a tier joining the
+   * platform should start whatever was last released — a decision, and one the image's own default
+   * already answers more conservatively. The next release of that package closes the gap.
+   *
+   * <p>In a transaction of its own for the reason {@link #declaredPins} states — its caller asks it
+   * from inside the durable funnel's claim, which belongs to another datasource.
+   */
+  public List<String> pinEnvs() {
+    return DbRetry.inNewTx(
+        "read the envs a release fans out over",
+        () -> {
+          Set<String> envs = new TreeSet<>(entries.listDistinctEnvs());
+          envs.add(instanceEnv.legacyEnv());
+          return List.copyOf(envs);
+        });
+  }
+
+  /**
+   * THE PIN REPORT: every pinned (application, key) that currently has a stored version, in the
    * answer's fixed order.
    *
-   * <p><b>It reads THIS instance's legacy env</b>, which is the honest answer while the platform
-   * promotion is half done: the pins are written by {@code bus/SoftwareReleaseListener}, which is
-   * still an env-less writer, and qits-artifacts' collector still asks for "the" pins. Both are
-   * generalised in a later wave — the report becomes per-env when the writer does, and not before,
-   * because a report over every env would let a version released into dev protect an image prod has
-   * never pulled.
+   * <p><b>It is a projection over two sources now</b>, put together by {@link ImagePins#merge}: the
+   * {@code docker} {@code packageVersion} keys of every governing declaration, and the {@link
+   * ImagePins#ORDERED} rows no declaration has claimed. One merge function, shared with {@code
+   * bus/SoftwareReleaseListener}, because a report that disagreed with the writer about which of the
+   * two won would be fiction in exactly the way this whole arrangement exists to prevent.
+   *
+   * <p><b>Declared coordinates of another type are not here.</b> The consumer is qits-artifacts'
+   * IMAGE collector and the wire field is called {@code image}; a {@code binary} coordinate in this
+   * answer would be a row it cannot act on, under a name it would try to parse as a tag.
+   *
+   * <p><b>It reads THIS instance's legacy env</b>, and {@code /pins} stays an env-less route for as
+   * long as its caller is env-less. The writer generalised in this wave and the report deliberately
+   * did not: qits-artifacts asks "which image tags may I delete" about a registry the whole platform
+   * shares, and per-env rows would be several answers to a question with one answer. What the legacy
+   * env costs is a version released into another tier and never into this one — which the next
+   * release of that package corrects, and which the tier-less collector could not have used anyway.
+   * The route dies with {@link InstanceEnv#legacyEnv()}, and what replaces it is a decision about
+   * what the collector should be told rather than a spelling of this one.
    *
    * <p><b>An entry with nothing stored is omitted rather than answered blank.</b> No entry means the
    * image has never been released into this environment, so there is no version, and a row carrying
    * an empty one would name a tag that cannot exist. Every mapping missing is an empty list, which
    * is a complete answer and not an error — a platform that has released nothing pins nothing.
    *
-   * <p>It reads the head rows one mapping at a time, which is four point-reads on a unique key
-   * today. A listing filtered in memory would be shorter to write and would quietly grow with the
-   * table instead of with the map.
+   * <p>It reads the head rows one mapping at a time, which is a point-read on a unique key per
+   * pinned pair. A listing filtered in memory would be shorter to write and would quietly grow with
+   * the table instead of with the pins.
    *
-   * <p>Not wrapped in a retry, like every other read here: the caller — qits-artifacts' collector,
-   * deciding what it may delete — has its own posture about an unreachable configuration service,
-   * and it is a fail-closed one. Patience here would only make its deadline arrive with less
-   * information.
+   * <p>Not wrapped in a retry, like every read this service SERVES: the caller — qits-artifacts'
+   * collector, deciding what it may delete — has its own posture about an unreachable configuration
+   * service, and it is a fail-closed one. Patience here would only make its deadline arrive with
+   * less information. The two bracketed reads above are not exceptions to that rule; they are the
+   * bus consumer's, and their bracket is about a transaction rather than about patience.
    */
   public List<ImagePinDto> imagePins() {
     String env = instanceEnv.legacyEnv();
-    List<ImagePinDto> pins = new ArrayList<>(ImagePins.ORDERED.size());
-    for (ImagePins.Pin pin : ImagePins.ORDERED) {
+    List<ImagePins.Pin> merged =
+        ImagePins.merge(
+            governingPins(declaredKeys.listByPackageType(ImagePins.DOCKER_TYPE)),
+            ImagePins.ORDERED);
+    List<ImagePinDto> pins = new ArrayList<>(merged.size());
+    for (ImagePins.Pin pin : merged) {
       entries
           .findEntry(env, pin.application(), pin.key())
           .map(entry -> entry.entryValue)
@@ -394,6 +481,18 @@ public class ConfigurationService {
    * the write would be answering 200 to an edit that changes nothing a container will ever see. The
    * 400 says so. {@code packageVersion} keys stay editable — a version IS a stored value, and pinning
    * one by hand is a real operation.
+   *
+   * <p><b>THE REFUSAL IS READ INSIDE THE BRACKET, NOT AHEAD OF IT</b>, and that is a correctness
+   * rule rather than tidiness. This method has a caller that is already in somebody else's
+   * transaction — {@code bus/SoftwareReleaseListener}, inside the durable funnel's claim, which
+   * belongs to the eventstream datasource — and a read taken before {@code inNewTx} runs in THAT
+   * transaction, where this store cannot enlist at all. Measured on 2026-09-07: with the guard
+   * outside, every release died on {@code Exception in association of connection to existing
+   * transaction} and stayed owed forever, while every test that called this from a request stayed
+   * green. Everything this method asks the database belongs on the far side of the suspension. The
+   * grammar checks above it are pure and stay where they are, so a malformed key is still a 400 that
+   * opens no transaction. A refusal thrown from inside is not retried: {@code DbRetry} retries
+   * connection failures and nothing else.
    */
   public ConfigurationEntry upsert(
       String env, String application, String key, String value, String actor) {
@@ -401,10 +500,10 @@ public class ConfigurationService {
     String app = ConfigurationKeys.requireApplication(application);
     String entryKey = ConfigurationKeys.requireKey(key);
     String entryValue = ConfigurationKeys.requireValue(value);
-    refuseIfRenderedByThePlatform(app, entryKey);
     return DbRetry.inNewTx(
         "set " + environment + "/" + ExtrasProperties.propertyName(app, entryKey),
         () -> {
+          refuseIfRenderedByThePlatform(app, entryKey);
           ConfigurationEntry stored =
               store(
                   environment,
@@ -561,6 +660,36 @@ public class ConfigurationService {
     revisions.persist(revision);
     revisions.flush();
     return revision;
+  }
+
+  /**
+   * The {@code packageVersion} keys of that list which their own application still stands behind,
+   * as pins.
+   *
+   * <p>The governing version is asked once per application rather than once per row: a declaration
+   * with six package keys is one application making one statement, and six identical reads of the
+   * intake log would be the same answer six times. Held for the length of this call only, for the
+   * reason {@link Governing} gives — a declaration arriving changes the answer for rows nobody
+   * touched.
+   */
+  private List<ImagePins.Pin> governingPins(List<ConfigurationDeclaredKey> declared) {
+    Map<String, Optional<String>> governingVersions = new LinkedHashMap<>();
+    List<ImagePins.Pin> pins = new ArrayList<>(declared.size());
+    for (ConfigurationDeclaredKey key : declared) {
+      if (!DeclarationParser.TYPE_PACKAGE_VERSION.equals(key.declaredType)
+          || key.packageName == null) {
+        continue;
+      }
+      Optional<String> governing =
+          governingVersions.computeIfAbsent(
+              key.application,
+              application ->
+                  declarations.governingOf(application).map(each -> each.version));
+      if (governing.filter(version -> version.equals(key.version)).isPresent()) {
+        pins.add(new ImagePins.Pin(key.packageName, key.application, key.declaredKey));
+      }
+    }
+    return pins;
   }
 
   /** The governing declaration with its keys indexed, or empty when the application has none. */

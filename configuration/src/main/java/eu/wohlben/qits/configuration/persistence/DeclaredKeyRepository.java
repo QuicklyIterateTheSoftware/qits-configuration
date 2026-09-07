@@ -26,16 +26,35 @@ public class DeclaredKeyRepository
    * mappings that a fifth consumer joins by somebody remembering to edit it. This method is the same
    * answer derived from what the applications themselves declared, for every application at once.
    *
-   * <p>It is not wired to the pin report yet, deliberately: {@code /pins} and {@code
-   * bus/SoftwareReleaseListener} are generalised in their own wave, and switching the report's source
-   * underneath a consumer that decides what to DELETE is not a change to make as a side effect of
-   * landing the store.
+   * <p><b>It is the listener's match now</b>, and that is the wave the index was cut for: a
+   * {@code SoftwareRelease} names a {@code (packageType, packageName)} and this is the question
+   * "which application asked to be told about that". The caller keeps only the keys of the GOVERNING
+   * declaration — a version this application no longer stands behind still has its rows here, and
+   * they are history rather than instructions.
    */
   public List<ConfigurationDeclaredKey> listByPackage(String packageType, String packageName) {
     return list(
         "packageType = ?1 and packageName = ?2 order by application, version, declaredKey",
         packageType,
         packageName);
+  }
+
+  /**
+   * THE SAME QUESTION WITHOUT A NAME: every declared key carrying a version of ANY package of one
+   * type.
+   *
+   * <p>The pin report asks it, because {@code GET /pins} answers about every image at once and has
+   * no name to narrow by — where the listener arrives holding the coordinate a release just named.
+   * It reads the same index: {@code package_type} leads it, so this is a range over one type's rows
+   * rather than a scan of every key ever declared.
+   *
+   * <p>Rows of another type are excluded rather than reported with an empty image, which is what
+   * keeps the report a statement about container images: a {@code binary} coordinate is a real
+   * declaration and a thing qits-artifacts' image collector cannot act on.
+   */
+  public List<ConfigurationDeclaredKey> listByPackageType(String packageType) {
+    return list(
+        "packageType = ?1 order by application, version, declaredKey", packageType);
   }
 
   /** Remove every key of one version, as its declaration is removed. */
