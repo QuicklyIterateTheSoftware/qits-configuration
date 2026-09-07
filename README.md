@@ -106,7 +106,7 @@ can honestly make. There is no anonymous route.
 | route | what it answers |
 | --- | --- |
 | `GET /applications` | every configured application, with a row per env it is configured in — entry count and head revision each |
-| `GET /applications/{app}/envs/{env}/resolved?version=` | **the deployer's read** — `{headRevision, properties}`, the properties at their full `qits.platform.deployments.extras.<app>.<key>` names. With `?version=` it is **the overlay read**: that version's declaration merged underneath, defaults for keys nobody set, `serviceAddress` keys rendered for *this* env. Without it, exactly the entries — and never a 404 |
+| `GET /applications/{app}/envs/{env}/resolved?version=` | **the deployer's read** — `{headRevision, properties}`, the properties at their full `qits.platform.deployments.extras.<app>.<key>` names. With `?version=` it is **the overlay read**: that version's declaration merged underneath, defaults for keys nobody set, `serviceAddress` keys rendered for *this* env. Without it, exactly the entries. **Never a 404 either way**: a version that names no declaration resolves entries-only too, because the unmigrated estate deploys through this read with the version it is deploying |
 | `GET /applications/{app}/envs/{env}/entries` | the current entries of that env, each flagged `orphaned` against the governing declaration |
 | `PUT /applications/{app}/envs/{env}/entries/{key}` | set one value. 201 the first time, 200 after; an identical value writes no revision |
 | `DELETE /applications/{app}/envs/{env}/entries/{key}` | remove one entry, keeping it in the history |

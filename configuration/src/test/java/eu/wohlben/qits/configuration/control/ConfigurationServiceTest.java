@@ -562,14 +562,64 @@ class ConfigurationServiceTest {
     assertEquals("stored", resolved.properties().get(property("app-versionless", "env.QITS_B")));
   }
 
+  /**
+   * THE UNMIGRATED ESTATE, which is most of it: an application with no declaration at all, asked for
+   * with the version it is deploying.
+   *
+   * <p>This was a 404 for one day and it took the platform down with it — the deployer passes {@code
+   * ?version=} on every extras read, so every deployment of every application without a {@code
+   * .config/qits/configuration.yml} was refused at argv build. Entries-only is the same map the
+   * version-absent read returns, and it is the honest answer: this version declared nothing.
+   */
   @Test
-  void aVersionThatNamesNoDeclarationIsA404() {
-    NotFoundException failure =
-        assertThrows(
-            NotFoundException.class,
-            () -> configuration.resolve(ENV, "app-unknown-version", Optional.of("2026.1.1")));
-    assertTrue(failure.getMessage().contains("2026.1.1"), failure.getMessage());
-    assertTrue(failure.getMessage().contains("app-unknown-version"), failure.getMessage());
+  void anUnmigratedApplicationAskedWithAVersionResolvesEntriesOnly() {
+    configuration.upsert(ENV, "app-unmigrated", "env.QITS_B", "stored", "alice");
+
+    ResolvedConfigurationDto resolved =
+        configuration.resolve(ENV, "app-unmigrated", Optional.of("2026.1.1"));
+
+    assertEquals(
+        configuration.resolve(ENV, "app-unmigrated").properties(),
+        resolved.properties(),
+        "a version naming no declaration is exactly the version-absent answer, never a 404");
+    assertEquals("stored", resolved.properties().get(property("app-unmigrated", "env.QITS_B")));
+  }
+
+  /**
+   * THE ROLLBACK: an application that HAS declared, asked for a version that did not.
+   *
+   * <p>Redeploying a migrated application at a pre-declaration tag is a real operation, and it must
+   * not be the one deployment that cannot be made. The declaration at another version contributes
+   * nothing here — the answer is the version's own, and this version declared nothing.
+   */
+  @Test
+  void aDeclaringApplicationAskedForAnUndeclaredVersionResolvesEntriesOnly() {
+    declare(
+        "app-rolledback",
+        ConfigurationKeys.TARGET_ENVIRONMENT,
+        "keys:\n  env.QITS_A:\n    type: string\n    default: from-the-declaration\n");
+    configuration.upsert(ENV, "app-rolledback", "env.QITS_B", "stored", "alice");
+
+    Map<String, String> properties =
+        configuration.resolve(ENV, "app-rolledback", Optional.of("2026.1.1")).properties();
+
+    assertEquals(1, properties.size(), "no defaults from the version that DID declare");
+    assertEquals("stored", properties.get(property("app-rolledback", "env.QITS_B")));
+    assertEquals(
+        "from-the-declaration",
+        configuration
+            .resolve(ENV, "app-rolledback", Optional.of(VERSION))
+            .properties()
+            .get(property("app-rolledback", "env.QITS_A")),
+        "and the version that declared still overlays, which is what makes this per-version");
+  }
+
+  /** A MALFORMED version is still a refusal — only the well-formed-but-undeclared case changed. */
+  @Test
+  void aMalformedVersionIsStillRefused() {
+    assertThrows(
+        BadRequestException.class,
+        () -> configuration.resolve(ENV, "app-badversion", Optional.of("not a version")));
   }
 
   /**

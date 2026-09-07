@@ -2,6 +2,7 @@ package eu.wohlben.qits.configuration.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -363,5 +364,45 @@ class DeclarationParserTest {
         keys.stream().map(DeclaredKey::key).toList(),
         "document order, so a person diffing the parsed view against the file reads them side by"
             + " side");
+  }
+
+  /**
+   * THIS REPOSITORY'S OWN {@code .config/qits/configuration.yml}, through this parser.
+   *
+   * <p>The deployer seeds that file as this application's declaration on every deployment, and this
+   * parser is what would refuse it — in a deployment, not in a build. Parsing it here moves the
+   * refusal to the commit that broke it, and it costs one file read. The file declares nothing:
+   * every variable this service boots with is platform wiring the bootstrap template writes, and the
+   * empty document is seeded for the plane fact it carries.
+   */
+  @Test
+  void thisRepositorysOwnDeclarationParses() {
+    java.nio.file.Path document = null;
+    for (java.nio.file.Path directory = java.nio.file.Path.of("").toAbsolutePath();
+        directory != null;
+        directory = directory.getParent()) {
+      java.nio.file.Path candidate = directory.resolve(".config/qits/configuration.yml");
+      if (java.nio.file.Files.isRegularFile(candidate)) {
+        document = candidate;
+        break;
+      }
+    }
+    assertNotNull(document, "the repository carries .config/qits/configuration.yml at its root");
+
+    DeclarationParser.Declaration declaration;
+    try {
+      declaration =
+          DeclarationParser.parse(
+              "qits-configuration",
+              VERSION,
+              java.nio.file.Files.readString(document, java.nio.charset.StandardCharsets.UTF_8));
+    } catch (java.io.IOException unreadable) {
+      throw new AssertionError("the repository's own declaration is unreadable", unreadable);
+    }
+    assertEquals(
+        List.of(),
+        declaration.keys(),
+        "this application declares no keys, and `keys: {}` is that statement rather than a document"
+            + " somebody forgot to fill in");
   }
 }

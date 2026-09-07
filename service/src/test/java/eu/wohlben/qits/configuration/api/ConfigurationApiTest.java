@@ -401,14 +401,24 @@ class ConfigurationApiTest {
         .body(prefix + "env.QITS_SET'", equalTo("from-the-operator"));
   }
 
+  /**
+   * The wire case of the unmigrated estate: {@code ?version=} naming no declaration is a 200 holding
+   * the entries, not a 404. The deployer passes the deployed version on every extras read, and it
+   * reads this route for applications that have never carried a declaration.
+   */
   @Test
-  void aResolvedReadForAVersionThatDoesNotExistIs404() {
+  void aResolvedReadForAVersionThatDoesNotExistIsTheEntries() {
+    putIn(LEGACY_ENV, "api-noversion", "env.QITS_STORED", "from-the-operator", 201);
+
     given()
         .when()
         .get(BASE + "/applications/api-noversion/envs/" + LEGACY_ENV + "/resolved?version=9.9")
         .then()
-        .statusCode(404)
-        .body("message", org.hamcrest.Matchers.containsString("9.9"));
+        .statusCode(200)
+        .body("properties.size()", equalTo(1))
+        .body(
+            "properties.'qits.platform.deployments.extras.api-noversion.env.QITS_STORED'",
+            equalTo("from-the-operator"));
   }
 
   @Test

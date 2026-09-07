@@ -190,10 +190,21 @@ public class ConfigurationService {
    * feature nobody was using. When it does pass one, the answer gets richer without the shape
    * changing.
    *
-   * <p><b>A version that names no declaration IS a 404</b>, and the asymmetry is deliberate. Absent
-   * means "I am not asking about declarations"; present means "resolve me against this document",
-   * and answering that with a bare entry map would be handing back a configuration missing every
-   * default the caller asked for, with nothing to say so.
+   * <p><b>A version that names no declaration resolves entries-only</b> — exactly the version-absent
+   * answer, never a 404. This was a 404 once, on the reasoning that a resolution against a
+   * declaration nobody seeded is a configuration missing every default the caller asked for with
+   * nothing to say so. That danger is real and it is guarded somewhere else: the deployer refuses a
+   * deployment whose declaration failed to seed (DECLARATION_REFUSED) at seed time, before this read
+   * ever happens. What the 404 actually hit was the UNMIGRATED ESTATE — an application with no
+   * {@code .config/qits/configuration.yml} at all, and a migrated application rolled back to a
+   * pre-declaration tag — where the deployer passes the deployed version on every extras read and got
+   * a 404 for it, refusing the deployment of every application that had not migrated yet. For both of
+   * those, "this version declared nothing" is a complete and correct answer, and entries-only states
+   * it: absent-means-not-yet-migrated, the doctrine this epic writes on the write side, applied on
+   * the read side. Measured on qits-ci@2026.907.184918, 2026-09-07.
+   *
+   * <p>The version is still validated as a version: a MALFORMED one is refused as before. Only the
+   * well-formed-but-undeclared case changed.
    *
    * <p><b>What each declared type contributes:</b>
    *
@@ -219,12 +230,14 @@ public class ConfigurationService {
     Set<String> renderedByThePlatform = new LinkedHashSet<>();
 
     if (version.isPresent()) {
+      // Grammar first: a malformed version is still a refusal. An undeclared one is not — it
+      // contributes no layer, and the entries below are the whole answer.
       String tag = ConfigurationKeys.requireDeclarationVersion(version.get());
-      declarations
-          .find(app, tag)
-          .orElseThrow(
-              () -> new NotFoundException("No declaration " + tag + " for application " + app));
-      for (ConfigurationDeclaredKey declared : declaredKeys.listOf(app, tag)) {
+      List<ConfigurationDeclaredKey> declaredAtVersion =
+          declarations.find(app, tag).isPresent()
+              ? declaredKeys.listOf(app, tag)
+              : List.<ConfigurationDeclaredKey>of();
+      for (ConfigurationDeclaredKey declared : declaredAtVersion) {
         String property = ExtrasProperties.propertyName(app, declared.declaredKey);
         switch (declared.declaredType) {
           case DeclarationParser.TYPE_SERVICE_ADDRESS -> {

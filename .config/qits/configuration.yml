@@ -1,0 +1,20 @@
+# What this application declares about its own configuration keys. The deployer reads this file from
+# the git host at the built sha and seeds it as this application's declaration for the version being
+# deployed, at every deployment, idempotent by content hash — so the document travels with the
+# commit exactly as .config/qits/deployments.yml does.
+#
+# THIS APPLICATION DECLARES NO KEYS, and the empty mapping is the statement rather than the absence
+# of one. Every environment variable this service boots with is PLATFORM WIRING — the token
+# audience, the machine-only switch, the OIDC URL, the observability URL — and platform wiring is
+# written by the bootstrap template per the contract page, not by a per-service default. A key
+# declared here that bootstrap also writes would be two places saying what one variable is, and the
+# one this service could see is not the one that wins.
+#
+# WHAT THE EMPTY DOCUMENT STILL BUYS, which is why it is committed rather than omitted. Seeding it
+# records this application's DEPLOYMENT PLANE — platform, per deployments.yml — as a fact the store
+# holds. That is the fact a serviceAddress key pointing at qits-configuration from any other
+# application's declaration renders against, and without it such a key is a 422 naming this
+# application rather than an address. It also means this service's own versioned resolved read
+# answers against a declaration it seeded itself, which is the loop the deployer runs on every one
+# of its deployments.
+keys: {}
