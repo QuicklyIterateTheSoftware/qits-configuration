@@ -22,10 +22,12 @@
 # every other deployment on the platform waits for — the deployer's resolved read now has one
 # address rather than one per tier.
 #
-# THE ROLLOUT COUPLING is real and belongs in the same breath: V2 backfills the env column from
-# QITS_CONFIGURATION_LEGACY_ENV, which ships with no default. The platform instance must be handed
-# that variable before it boots, or migrate-at-start refuses and the deployment fails at Flyway.
-# That refusal is the design and not an accident — see META-INF/microprofile-config.properties.
+# THE ROLLOUT COUPLING IT USED TO HAVE IS GONE, and it is worth saying so where it was written down:
+# V2 backfilled the env column from QITS_CONFIGURATION_LEGACY_ENV, which shipped with no default, so
+# an instance not handed that variable died at migrate-at-start. That refusal was the design while
+# there were inherited rows to stamp; a freshly bootstrapped platform has none, and the requirement
+# only ever failed cold boots. The placeholder is a literal now — see
+# META-INF/microprofile-config.properties — and this deployment needs no such variable.
 #
 # `deployment_target` is written out here rather than left to its default because this is the one
 # key a reader of this file will want to check first, and the answer is a decision rather than an

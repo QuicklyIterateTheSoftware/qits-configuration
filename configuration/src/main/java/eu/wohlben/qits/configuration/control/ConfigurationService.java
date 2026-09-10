@@ -51,9 +51,8 @@ import java.util.UUID;
  * first.</b> This service runs on the platform plane and holds every environment's configuration in
  * one store, so there is no "the" configuration of an application — there is dev's and there is
  * prod's, and a method that let a caller omit which one it meant would be the one place the two
- * could be confused. The transitional env-less API routes supply {@link InstanceEnv#legacyEnv()}
- * themselves rather than being served by an overload here, so the defaulting lives at the boundary
- * that is going to be deleted.
+ * could be confused. There is no overload here that omits it, and the env-less API routes that once
+ * supplied one configured env on a caller's behalf are gone.
  *
  * <p><b>Every write goes through {@link #store} and there is no second door.</b> Appending the
  * revision and moving the head is one decision, and splitting it across two callers is how a head
@@ -90,8 +89,6 @@ public class ConfigurationService {
   @Inject DeclaredKeyRepository declaredKeys;
 
   @Inject ConfigurationMapper mapper;
-
-  @Inject InstanceEnv instanceEnv;
 
   /**
    * One application's governing declaration with its keys indexed — the shape every read that has to
@@ -370,7 +367,7 @@ public class ConfigurationService {
 
   /**
    * Every env a value the platform writes ITSELF has to reach: every env this store knows anything
-   * about, plus this instance's legacy env.
+   * about.
    *
    * <p><b>An entry is a per-env override and there is no default row to write</b>, so a pin that is
    * not written into an env is not "inherited" there — it is absent, and the container starts on
@@ -378,12 +375,12 @@ public class ConfigurationService {
    * rather than landing in one: the alternative is a platform where dev runs the version CI just
    * built and prod runs whatever was current the day it was configured, with nothing saying so.
    *
-   * <p><b>The legacy env is in the set unconditionally</b>, and that is what keeps this change
-   * additive. It is the one env this instance is certain of — the env its inherited rows were
-   * stamped with and the one its env-less callers mean — and before the fan-out it was the only env
-   * a pin was ever written into. A store that has not been bootstrapped yet knows of no env at all,
-   * and without the floor the first release into a fresh platform would write nothing anywhere. It
-   * leaves with {@link InstanceEnv}, at which point the fan-out is exactly what the store knows.
+   * <p><b>It is exactly what the store knows, with no floor under it.</b> There used to be one — the
+   * configured legacy env, added unconditionally — because the fan-out replaced a writer that only
+   * ever wrote there and the floor is what made that change additive. It left with the property that
+   * named it, as its own javadoc said it would. What the floor covered was a store that knows of no
+   * env at all, where a release now writes nothing; that store is one nobody has imported into yet,
+   * and a bootstrap imports before it releases.
    *
    * <p><b>The accepted residual: an env born AFTER a release has no row until the next one.</b>
    * Nothing backfills, because a backfill would be this service deciding that a tier joining the
@@ -398,7 +395,6 @@ public class ConfigurationService {
         "read the envs a release fans out over",
         () -> {
           Set<String> envs = new TreeSet<>(entries.listDistinctEnvs());
-          envs.add(instanceEnv.legacyEnv());
           return List.copyOf(envs);
         });
   }
@@ -417,14 +413,14 @@ public class ConfigurationService {
    * IMAGE collector and the wire field is called {@code image}; a {@code binary} coordinate in this
    * answer would be a row it cannot act on, under a name it would try to parse as a tag.
    *
-   * <p><b>It reads THIS instance's legacy env</b>, and {@code /pins} stays an env-less route for as
-   * long as its caller is env-less. The writer generalised in this wave and the report deliberately
-   * did not: qits-artifacts asks "which image tags may I delete" about a registry the whole platform
-   * shares, and per-env rows would be several answers to a question with one answer. What the legacy
-   * env costs is a version released into another tier and never into this one — which the next
-   * release of that package corrects, and which the tier-less collector could not have used anyway.
-   * The route dies with {@link InstanceEnv#legacyEnv()}, and what replaces it is a decision about
-   * what the collector should be told rather than a spelling of this one.
+   * <p><b>It reads EVERY env, and {@code /pins} is env-less because its caller is.</b> qits-artifacts
+   * asks "which image tags may I delete" about a registry the whole platform shares, so the answer
+   * has no tier in it — but the question is answered by the UNION rather than by one env, which is
+   * the only reading that is safe in the direction this answer is used. It used to read one
+   * configured env, and what that cost was a version released into another tier and never into this
+   * one: a tag still in use by a running container, missing from the keep-list. Two tiers on
+   * different versions of one image now contribute a row each, and the collector keeps both, which
+   * is what it should do with an image two containers are running.
    *
    * <p><b>An entry with nothing stored is omitted rather than answered blank.</b> No entry means the
    * image has never been released into this environment, so there is no version, and a row carrying
@@ -442,20 +438,23 @@ public class ConfigurationService {
    * bus consumer's, and their bracket is about a transaction rather than about patience.
    */
   public List<ImagePinDto> imagePins() {
-    String env = instanceEnv.legacyEnv();
     List<ImagePins.Pin> merged =
         ImagePins.merge(
             governingPins(declaredKeys.listByPackageType(ImagePins.DOCKER_TYPE)),
             ImagePins.ORDERED);
     List<ImagePinDto> pins = new ArrayList<>(merged.size());
     for (ImagePins.Pin pin : merged) {
-      entries
-          .findEntry(env, pin.application(), pin.key())
-          .map(entry -> entry.entryValue)
-          .filter(version -> !version.isBlank())
-          .ifPresent(
-              version ->
-                  pins.add(new ImagePinDto(pin.image(), version, pin.application(), pin.key())));
+      // One row per DISTINCT version, not per env: the wire shape has no env field and two tiers
+      // holding the same version are one fact about the registry, not two.
+      Set<String> versions = new LinkedHashSet<>();
+      for (ConfigurationEntry entry : entries.listByKey(pin.application(), pin.key())) {
+        if (entry.entryValue != null && !entry.entryValue.isBlank()) {
+          versions.add(entry.entryValue);
+        }
+      }
+      for (String version : versions) {
+        pins.add(new ImagePinDto(pin.image(), version, pin.application(), pin.key()));
+      }
     }
     return pins;
   }

@@ -32,8 +32,8 @@ the value that was removed is still readable.
 holds every environment's configuration in one store, so there is no "the" configuration of an
 application — there is dev's and there is prod's. What the old one-instance-per-tier deployment
 asserted is a column now, and every route that reaches a row names the env it means. The env-less
-spellings below survive the transition by supplying `qits.configuration.legacy-env`, the one property
-that also stamps the backfill, and they die with it.
+spellings that carried callers across the plane move are gone, and so is the one property that
+answered for them.
 
 **An identical write appends nothing.** That is what makes a bootstrap free to re-import its file on
 every boot, and it keeps the history a record of changes rather than of runs.
@@ -118,12 +118,14 @@ can honestly make. There is no anonymous route.
 | `GET /applications/{app}/declarations` | every version declared, newest first, with the governing one flagged |
 | `GET /applications/{app}/declarations/{version}` | one declaration: the parsed keys **and** the document verbatim |
 
-**Every entry route has an env-less spelling too** — `/applications/{app}/resolved`, `/entries`,
-`/entries/{key}`, `/history`, and `POST /import` with no `?env=`. They delegate to the env-addressed
-ones with `qits.configuration.legacy-env` and exist for the callers that predate the plane flip; the
-deployer's per-deployment read is why they could not simply be replaced. They die in the cutover
-feature, and their javadoc says so. The declaration routes have no env spelling at all: a declaration
-is a fact about a build and is the same fact in every tier.
+**There is no env-less spelling of an entry route.** `/applications/{app}/resolved`, `/entries`,
+`/entries/{key}`, `/history` and `POST /import` with no `?env=` existed across the plane move,
+delegating to one configured env named by `QITS_CONFIGURATION_LEGACY_ENV`; the last caller of one
+stopped asking, and they went with the setting — a fresh platform has no legacy env, so requiring
+one was a variable an operator had to invent before the service would boot. A caller that still asks
+for one gets a 404, and an import with no `?env=` a 400. The declaration routes have no env spelling
+either, for a different reason: a declaration is a fact about a build and is the same fact in every
+tier.
 
 The import takes its env from the caller because the file cannot carry one — the grammar is
 `extras.<application>.<key>` and has nowhere to put a tier — so the assertion is made once, for the
@@ -137,9 +139,10 @@ environment — the one named in the path of the read.
 
 ### The pin report
 
-`GET /pins` answers one row per image→(application, key) mapping that currently has a stored version,
-ordered by image, then application, then key. An image appears twice when two applications start it —
-`qits/workspace` is a workspace and a refinement container — and a mapping with nothing stored is
+`GET /pins` answers one row per image→(application, key)→version that is currently stored, ordered by
+image, then application, then key. An image appears twice when two applications start it —
+`qits/workspace` is a workspace and a refinement container — or when two envs hold different versions
+of it; a mapping with nothing stored anywhere is
 **omitted**, because an image nobody has released here has no version to name. An empty `pins` is an
 ordinary 200.
 
@@ -148,8 +151,10 @@ application's own declaration says which package that key carries a version of, 
 one of `type: docker` is a mapping; `control/ImagePins` is the residual list of pins still carried by
 hand for consumers that have not declared yet, and a row of it is dropped when a declaration names
 the same (application, key). A `binary` coordinate is a real declaration and stays out of this
-answer, which is about container images. The route reads the legacy env: qits-artifacts asks about a
-registry the whole platform shares, and per-env rows would be several answers to a question with one.
+answer, which is about container images. **The route is env-less because its caller is, and it reads
+the UNION over every env**: qits-artifacts asks about a registry the whole platform shares, so the
+answer has no tier in it — but two tiers on two versions of one image are two tags in use, and both
+are reported. Two tiers on the same version are one row, since the shape carries no env.
 
 It is a projection of entries a caller could read one at a time; what it adds is **the mapping**,
 which lives in this service and nowhere else. **qits-artifacts' garbage collector reads it as a pin

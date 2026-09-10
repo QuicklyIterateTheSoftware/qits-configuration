@@ -2,7 +2,6 @@ package eu.wohlben.qits.configuration.api;
 
 import eu.wohlben.qits.configuration.control.ConfigurationKeys;
 import eu.wohlben.qits.configuration.control.ConfigurationService;
-import eu.wohlben.qits.configuration.control.InstanceEnv;
 import eu.wohlben.qits.configuration.dto.ImportSummaryDto;
 import io.quarkus.security.identity.SecurityIdentity;
 import jakarta.annotation.security.RolesAllowed;
@@ -52,17 +51,14 @@ public class ImportController {
 
   @Inject ConfigurationService configuration;
 
-  @Inject InstanceEnv instanceEnv;
-
   @Inject SecurityIdentity identity;
 
   /**
-   * @param env the environment the whole file describes. <b>Absent is TRANSITIONAL</b> and means
-   *     this instance's legacy env — the one V2's backfill stamped into the rows it inherited — so a
-   *     bootstrap that has not learned the parameter yet keeps seeding the environment it always
-   *     seeded across the flip to the platform plane. The default goes away with the env-less routes
-   *     in the cutover feature, and an import that does not say which environment it is asserting
-   *     will then be a 400 rather than a guess.
+   * @param env the environment the whole file describes. <b>Required.</b> It was optional across
+   *     the plane move, defaulting to this instance's legacy env so a bootstrap that had not learned
+   *     the parameter kept seeding the environment it always seeded; that default is gone with the
+   *     env-less routes, and an import that does not say which environment it is asserting is a 400
+   *     rather than a guess.
    */
   @POST
   @Consumes(MediaType.TEXT_PLAIN)
@@ -71,15 +67,11 @@ public class ImportController {
   @APIResponse(
       responseCode = "400",
       description =
-          "The env is not a valid name, or a line carries the extras prefix and a key or"
-              + " application this service refuses")
+          "The env is absent or not a valid name, or a line carries the extras prefix and a key"
+              + " or application this service refuses")
   @RolesAllowed({"qits:admin", "qits:system"})
   public ImportSummaryDto importProperties(@QueryParam("env") String env, String body) {
-    String environment =
-        env == null || env.isBlank()
-            ? instanceEnv.legacyEnv()
-            : ConfigurationKeys.requireEnv(env);
-    return configuration.importProperties(environment, body, actor());
+    return configuration.importProperties(ConfigurationKeys.requireEnv(env), body, actor());
   }
 
   /** See the note on {@code ConfigurationController.actor()}: a null is "no name worth recording". */

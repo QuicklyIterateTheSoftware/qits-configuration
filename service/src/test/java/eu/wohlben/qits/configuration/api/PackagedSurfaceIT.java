@@ -91,20 +91,7 @@ public class PackagedSurfaceIT {
       return Map.of(
           "QITS_RESOURCE_DB_URL", databaseUrl(),
           "QITS_RESOURCE_DB_USERNAME", EmbeddedPg.USER,
-          "QITS_RESOURCE_DB_PASSWORD", EmbeddedPg.PASSWORD,
-          // The env V2 backfills with and the legacy routes answer for. Without it the launched
-          // artifact dies at Flyway's migrate-at-start, which is the shipped refuse-to-boot stance
-          // working — the jar ships no default on purpose.
-          //
-          // SPELLED DOTTED, unlike the three above, and the difference is not a slip. These
-          // overrides reach the process as SYSTEM PROPERTIES, and MicroProfile's UPPER_SNAKE-to-
-          // dotted mapping belongs to the environment-variable source alone. The datasource triple
-          // survives that because the shipped expression names `QITS_RESOURCE_DB_URL` literally, so
-          // the property key and the expression are the same string; this one's shipped expression
-          // names `qits.configuration.legacy-env`, so that is the key that has to exist. A
-          // deployment sets QITS_CONFIGURATION_LEGACY_ENV as a real environment variable and the env
-          // source maps it — a path a launched-from-Maven process cannot take.
-          "qits.configuration.legacy-env", "test");
+          "QITS_RESOURCE_DB_PASSWORD", EmbeddedPg.PASSWORD);
     }
 
     private static synchronized String databaseUrl() {

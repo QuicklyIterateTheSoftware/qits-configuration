@@ -25,36 +25,27 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Each test names an application of its own. The suite shares one database across classes.
  *
- * <p><b>Two spellings of every route are exercised.</b> The env-addressed ones —
- * {@code /applications/<app>/envs/<env>/…} — are the surface this service keeps; the env-less ones
- * are transitional and answer for {@code qits.configuration.legacy-env}, which this suite sets to
- * {@code test}. The tests that use the short form are therefore also the assertion that the
- * delegation lands where it says it does: what {@code put(...)} writes, {@link
- * #aValueWrittenInOneEnvIsNotVisibleFromAnother} reads back through {@code /envs/test/}.
+ * <p><b>Every route names its env.</b> {@code /applications/<app>/envs/<env>/…} is the whole
+ * surface — the env-less spellings that carried callers across the plane move are gone, and {@link
+ * #theEnvLessRoutesAreGone} is the assertion that they stayed gone.
  */
 @QuarkusTest
 class ConfigurationApiTest {
 
   private static final String BASE = "/configuration/api";
 
-  /** What the legacy env-less routes resolve to here — {@code qits.configuration.legacy-env}. */
-  private static final String LEGACY_ENV = "test";
+  /** The env this suite writes in. */
+  private static final String ENV = "test";
 
   /** A second environment, to prove one env's rows are not the other's. */
   private static final String OTHER_ENV = "staging";
 
-  /** A write through the TRANSITIONAL env-less route, which lands in the legacy env. */
+  /** A write into this suite's env. */
   private void put(String application, String key, String value, int expected) {
-    given()
-        .contentType(ContentType.JSON)
-        .body(new ConfigurationController.SetEntryRequest(value))
-        .when()
-        .put(BASE + "/applications/" + application + "/entries/" + key)
-        .then()
-        .statusCode(expected);
+    putIn(ENV, application, key, value, expected);
   }
 
-  /** A write through the env-addressed route — the spelling that survives the cutover. */
+  /** A write into a named env. */
   private void putIn(String env, String application, String key, String value, int expected) {
     given()
         .contentType(ContentType.JSON)
@@ -72,7 +63,7 @@ class ConfigurationApiTest {
 
     given()
         .when()
-        .get(BASE + "/applications/api-create/entries")
+        .get(BASE + "/applications/api-create/envs/" + ENV + "/entries")
         .then()
         .statusCode(200)
         .body("entries.size()", equalTo(1))
@@ -90,7 +81,7 @@ class ConfigurationApiTest {
 
     given()
         .when()
-        .get(BASE + "/applications/api-resolve/resolved")
+        .get(BASE + "/applications/api-resolve/envs/" + ENV + "/resolved")
         .then()
         .statusCode(200)
         .body("headRevision", greaterThan(0))
@@ -105,7 +96,7 @@ class ConfigurationApiTest {
   void anUnconfiguredApplicationResolvesEmptyRatherThan404() {
     given()
         .when()
-        .get(BASE + "/applications/api-unconfigured/resolved")
+        .get(BASE + "/applications/api-unconfigured/envs/" + ENV + "/resolved")
         .then()
         .statusCode(200)
         .body("headRevision", equalTo(0))
@@ -118,20 +109,20 @@ class ConfigurationApiTest {
 
     given()
         .when()
-        .delete(BASE + "/applications/api-delete/entries/env.A")
+        .delete(BASE + "/applications/api-delete/envs/" + ENV + "/entries/env.A")
         .then()
         .statusCode(204);
 
     given()
         .when()
-        .get(BASE + "/applications/api-delete/entries")
+        .get(BASE + "/applications/api-delete/envs/" + ENV + "/entries")
         .then()
         .statusCode(200)
         .body("entries.size()", equalTo(0));
 
     given()
         .when()
-        .get(BASE + "/applications/api-delete/history")
+        .get(BASE + "/applications/api-delete/envs/" + ENV + "/history")
         .then()
         .statusCode(200)
         .body("revisions.size()", equalTo(2))
@@ -145,7 +136,7 @@ class ConfigurationApiTest {
   void deletingWhatIsNotThereIs404WithAMessage() {
     given()
         .when()
-        .delete(BASE + "/applications/api-missing/entries/env.A")
+        .delete(BASE + "/applications/api-missing/envs/" + ENV + "/entries/env.A")
         .then()
         .statusCode(404)
         .body("message", notNullValue());
@@ -171,11 +162,11 @@ class ConfigurationApiTest {
         .body("applications.application", hasItem("api-listed"))
         .body(
             "applications.find { it.application == 'api-listed' }.envs.env",
-            equalTo(java.util.List.of(OTHER_ENV, LEGACY_ENV)))
+            equalTo(java.util.List.of(OTHER_ENV, ENV)))
         .body(
             "applications.find { it.application == 'api-listed' }.envs"
                 + ".find { it.env == '"
-                + LEGACY_ENV
+                + ENV
                 + "' }.entries",
             equalTo(1))
         .body(
@@ -199,7 +190,7 @@ class ConfigurationApiTest {
    */
   @Test
   void aValueWrittenInOneEnvIsNotVisibleFromAnother() {
-    putIn(LEGACY_ENV, "api-envs", "env.A", "from-test", 201);
+    putIn(ENV, "api-envs", "env.A", "from-test", 201);
 
     given()
         .when()
@@ -234,11 +225,11 @@ class ConfigurationApiTest {
 
     given()
         .when()
-        .get(BASE + "/applications/api-envs/envs/" + LEGACY_ENV + "/entries")
+        .get(BASE + "/applications/api-envs/envs/" + ENV + "/entries")
         .then()
         .statusCode(200)
         .body("entries.size()", equalTo(1))
-        .body("entries[0].env", equalTo(LEGACY_ENV))
+        .body("entries[0].env", equalTo(ENV))
         .body("entries[0].value", equalTo("from-test"));
 
     given()
@@ -251,30 +242,27 @@ class ConfigurationApiTest {
   }
 
   /**
-   * The transitional route and the env-addressed one are the same door. A write through the short
-   * spelling is readable at {@code /envs/<legacy>/}, and the history there records it — which is the
-   * whole promise made to a caller that has not learned the segment yet.
+   * THE CUTOVER, asserted rather than assumed. The env-less spellings answered for one configured
+   * env and are removed; a caller that still asks for one gets a 404 from the router rather than a
+   * silent write into whichever env this instance happened to be told about.
    */
   @Test
-  void theEnvLessRoutesAnswerForTheLegacyEnv() {
-    put("api-legacy", "env.A", "one", 201);
-
+  void theEnvLessRoutesAreGone() {
+    given().when().get(BASE + "/applications/api-legacy/resolved").then().statusCode(404);
+    given().when().get(BASE + "/applications/api-legacy/entries").then().statusCode(404);
+    given().when().get(BASE + "/applications/api-legacy/history").then().statusCode(404);
     given()
         .when()
-        .get(BASE + "/applications/api-legacy/envs/" + LEGACY_ENV + "/entries")
+        .delete(BASE + "/applications/api-legacy/entries/env.A")
         .then()
-        .statusCode(200)
-        .body("entries.size()", equalTo(1))
-        .body("entries[0].env", equalTo(LEGACY_ENV))
-        .body("entries[0].value", equalTo("one"));
-
+        .statusCode(404);
     given()
+        .contentType(ContentType.JSON)
+        .body(new ConfigurationController.SetEntryRequest("one"))
         .when()
-        .get(BASE + "/applications/api-legacy/history")
+        .put(BASE + "/applications/api-legacy/entries/env.A")
         .then()
-        .statusCode(200)
-        .body("revisions.size()", equalTo(1))
-        .body("revisions[0].env", equalTo(LEGACY_ENV));
+        .statusCode(404);
   }
 
   @Test
@@ -293,7 +281,7 @@ class ConfigurationApiTest {
         .contentType(ContentType.JSON)
         .body(new ConfigurationController.SetEntryRequest("x"))
         .when()
-        .put(BASE + "/applications/api-refuse/entries/volumes[0]")
+        .put(BASE + "/applications/api-refuse/envs/" + ENV + "/entries/volumes[0]")
         .then()
         .statusCode(400)
         .body("message", org.hamcrest.Matchers.containsString("mounts"));
@@ -303,7 +291,7 @@ class ConfigurationApiTest {
   void aRefusedApplicationNameIs400OnAReadToo() {
     given()
         .when()
-        .get(BASE + "/applications/Not_A_Label/resolved")
+        .get(BASE + "/applications/Not_A_Label/envs/" + ENV + "/resolved")
         .then()
         .statusCode(400)
         .body("message", org.hamcrest.Matchers.containsString("Not_A_Label"));
@@ -315,7 +303,7 @@ class ConfigurationApiTest {
         .contentType(ContentType.JSON)
         .body("{}")
         .when()
-        .put(BASE + "/applications/api-novalue/entries/env.A")
+        .put(BASE + "/applications/api-novalue/envs/" + ENV + "/entries/env.A")
         .then()
         .statusCode(400)
         .body("message", org.hamcrest.Matchers.containsString("DELETE"));
@@ -375,12 +363,12 @@ class ConfigurationApiTest {
             service: api-bus
             port: 8080
         """);
-    putIn(LEGACY_ENV, "api-overlay", "env.QITS_SET", "from-the-operator", 201);
+    putIn(ENV, "api-overlay", "env.QITS_SET", "from-the-operator", 201);
 
     String prefix = "properties.'qits.platform.deployments.extras.api-overlay.";
     given()
         .when()
-        .get(BASE + "/applications/api-overlay/envs/" + LEGACY_ENV + "/resolved?version=1.0")
+        .get(BASE + "/applications/api-overlay/envs/" + ENV + "/resolved?version=1.0")
         .then()
         .statusCode(200)
         .body("headRevision", greaterThan(0))
@@ -394,7 +382,7 @@ class ConfigurationApiTest {
     // a version yet, and this is the assertion that it keeps getting exactly what it gets today.
     given()
         .when()
-        .get(BASE + "/applications/api-overlay/envs/" + LEGACY_ENV + "/resolved")
+        .get(BASE + "/applications/api-overlay/envs/" + ENV + "/resolved")
         .then()
         .statusCode(200)
         .body("properties.size()", equalTo(1))
@@ -408,11 +396,11 @@ class ConfigurationApiTest {
    */
   @Test
   void aResolvedReadForAVersionThatDoesNotExistIsTheEntries() {
-    putIn(LEGACY_ENV, "api-noversion", "env.QITS_STORED", "from-the-operator", 201);
+    putIn(ENV, "api-noversion", "env.QITS_STORED", "from-the-operator", 201);
 
     given()
         .when()
-        .get(BASE + "/applications/api-noversion/envs/" + LEGACY_ENV + "/resolved?version=9.9")
+        .get(BASE + "/applications/api-noversion/envs/" + ENV + "/resolved?version=9.9")
         .then()
         .statusCode(200)
         .body("properties.size()", equalTo(1))
@@ -430,7 +418,7 @@ class ConfigurationApiTest {
 
     given()
         .when()
-        .get(BASE + "/applications/api-orphan/envs/" + LEGACY_ENV + "/entries")
+        .get(BASE + "/applications/api-orphan/envs/" + ENV + "/entries")
         .then()
         .statusCode(200)
         .body("entries.find { it.key == 'env.QITS_DECLARED' }.orphaned", equalTo(false))
@@ -457,7 +445,7 @@ class ConfigurationApiTest {
         .contentType(ContentType.JSON)
         .body(new ConfigurationController.SetEntryRequest("http://mine:1"))
         .when()
-        .put(BASE + "/applications/api-guarded/envs/" + LEGACY_ENV + "/entries/env.QITS_BUS_URL")
+        .put(BASE + "/applications/api-guarded/envs/" + ENV + "/entries/env.QITS_BUS_URL")
         .then()
         .statusCode(400)
         .body("message", org.hamcrest.Matchers.containsString("cannot be set by hand"));

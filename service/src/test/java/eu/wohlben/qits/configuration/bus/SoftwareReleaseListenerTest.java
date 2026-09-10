@@ -34,8 +34,8 @@ import org.junit.jupiter.api.Test;
  */
 class SoftwareReleaseListenerTest {
 
-  /** The env of a store that knows one — what {@code pinEnvs()} answers before a platform has tiers. */
-  private static final String LEGACY_ENV = "test";
+  /** The one env of a store that knows one — what {@code pinEnvs()} answers for a single-tier platform. */
+  private static final String ENV = "test";
 
   /** …and the second one, for the fan-out. */
   private static final String OTHER_ENV = "prod";
@@ -62,7 +62,7 @@ class SoftwareReleaseListenerTest {
     final Map<String, List<ImagePins.Pin>> declared = new LinkedHashMap<>();
 
     /** What the store knows of, and it is asked rather than assumed. */
-    List<String> envs = List.of(LEGACY_ENV);
+    List<String> envs = List.of(ENV);
 
     CapturingService declaring(
         String packageType, String packageName, String application, String key) {
@@ -158,7 +158,7 @@ class SoftwareReleaseListenerTest {
     listener.onFrame(frame);
 
     Write write = service.only();
-    assertEquals(LEGACY_ENV, write.env());
+    assertEquals(ENV, write.env());
     assertEquals("qits-stt", write.application());
     assertEquals("env.QITS_STT_VERSION", write.key());
     assertEquals(VERSION, write.value());
@@ -231,7 +231,7 @@ class SoftwareReleaseListenerTest {
   @Test
   void aPinIsWrittenIntoEveryEnvTheStoreKnowsAbout() {
     CapturingService service = new CapturingService();
-    service.envs = List.of(LEGACY_ENV, OTHER_ENV);
+    service.envs = List.of(ENV, OTHER_ENV);
     SoftwareReleaseListener listener = listenerWith(service);
     EventFrame frame = frameFor("docker", "qits/project-agent", VERSION);
 
@@ -241,7 +241,7 @@ class SoftwareReleaseListenerTest {
         service.on("qits-projects", "env.QITS_PROJECTS_AGENT_IMAGE_VERSION");
     assertEquals(2, written.size(), "one pin, one write per env");
     assertEquals(
-        List.of(LEGACY_ENV, OTHER_ENV),
+        List.of(ENV, OTHER_ENV),
         written.stream().map(Write::env).toList(),
         "every env the store named, in the order it named them");
     assertTrue(
@@ -261,7 +261,7 @@ class SoftwareReleaseListenerTest {
     listener.onFrame(frame);
 
     Write write = service.only();
-    assertEquals(LEGACY_ENV, write.env());
+    assertEquals(ENV, write.env());
     assertEquals("qits-projects", write.application());
     assertEquals("env.QITS_PROJECTS_AGENT_IMAGE_VERSION", write.key());
     assertEquals(VERSION, write.value());
@@ -288,7 +288,7 @@ class SoftwareReleaseListenerTest {
 
     Write workspaces = service.on("qits-workspaces");
     assertNotNull(workspaces, "the application that starts a workspace must be pinned");
-    assertEquals(LEGACY_ENV, workspaces.env());
+    assertEquals(ENV, workspaces.env());
     assertEquals("env.QITS_WORKSPACE_IMAGE_VERSION", workspaces.key());
     assertEquals(VERSION, workspaces.value());
 

@@ -38,10 +38,9 @@ import org.junit.jupiter.api.Test;
  * (Flyway cleans at start, not between tests), so a shared name would make one test's rows another
  * test's surprise.
  *
- * <p><b>Every call names an env, because every method does.</b> {@link #ENV} is the suite's own,
- * matching {@code qits.configuration.legacy-env} in this module's test properties — so the rows these
- * tests write sit in the same env the V2 backfill would have stamped, and a value read back under
- * another env is the thing {@link #anEnvIsPartOfTheIdentityOfAnEntry} refuses.
+ * <p><b>Every call names an env, because every method does.</b> {@link #ENV} is the suite's own, and
+ * a value read back under another env is the thing {@link #anEnvIsPartOfTheIdentityOfAnEntry}
+ * refuses.
  *
  * <p><b>ONE TRAP, MEASURED RATHER THAN FEARED: do not read a row through {@link
  * ConfigurationService#require} BEFORE writing it and then read it again after.</b> Every write here
@@ -56,7 +55,7 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 class ConfigurationServiceTest {
 
-  /** The env this suite writes in — the one the test properties configure as the legacy env. */
+  /** The env this suite writes in. */
   private static final String ENV = "test";
 
   /** A second env, used only to prove that the first one's rows are not visible from it. */
@@ -263,22 +262,22 @@ class ConfigurationServiceTest {
   }
 
   /**
-   * WHERE A RELEASE LANDS: every env this store knows anything about, and the legacy env whether or
-   * not it knows anything about that one.
+   * WHERE A RELEASE LANDS: every env this store knows anything about, and nothing else.
    *
-   * <p>The floor is what keeps the fan-out additive. Before it, a pin went to the legacy env
-   * unconditionally; a store whose envs are read out of its own rows knows of none at all until
-   * something has been written, and the first release into a fresh platform would have written
-   * nowhere.
+   * <p>There used to be a floor under this — one configured legacy env, added whether the store knew
+   * of it or not — because the fan-out replaced a writer that only ever wrote there. It left with
+   * the property that named it. What it covered was a store nothing has been written into, where a
+   * release now reaches nowhere; a platform imports its extras before it releases anything, so the
+   * empty case is a store that is not in use rather than one being missed.
    */
   @Test
-  void aReleaseFansOutOverEveryEnvTheStoreKnowsAndAlwaysTheLegacyOne() {
+  void aReleaseFansOutOverEveryEnvTheStoreKnows() {
     configuration.upsert("pin-env-probe", "app-pin-envs", "env.A", "one", "alice");
 
     List<String> envs = configuration.pinEnvs();
 
     assertTrue(envs.contains("pin-env-probe"), "an env with rows is an env a release reaches");
-    assertTrue(envs.contains(ENV), "and this instance's legacy env is in it by construction");
+    assertTrue(envs.contains(ENV), "and so is this suite's own, which has rows");
     assertEquals(envs.stream().sorted().distinct().toList(), envs, "sorted, and each env once");
   }
 
@@ -290,8 +289,8 @@ class ConfigurationServiceTest {
     assertThrows(
         BadRequestException.class,
         () -> configuration.resolve("", "app-env-guard"),
-        "a blank env is refused rather than silently meaning the legacy one — that defaulting lives"
-            + " at the API boundary, which is where it can be deleted");
+        "a blank env is refused rather than silently meaning some default one — there is no env a"
+            + " caller can omit any more");
   }
 
   @Test
@@ -454,6 +453,45 @@ class ConfigurationServiceTest {
     assertTrue(
         shadowed.stream().noneMatch(pin -> "qits/project-agent".equals(pin.image())),
         "and the authored name it shadows is not reported beside it");
+
+    // TWO TIERS, TWO VERSIONS, TWO ROWS. The report is the UNION over envs, because its consumer is
+    // deciding what it may delete out of one registry the whole platform shares: a version running
+    // in a tier this report did not look at is a tag collected out from under a running container.
+    configuration.upsert(
+        OTHER_ENV, "qits-workspaces", "env.QITS_WORKSPACE_IMAGE_VERSION", "2026.905.9", "alice");
+
+    List<ImagePinDto> across = configuration.imagePins();
+    assertTrue(
+        across.contains(
+            new ImagePinDto(
+                "qits/workspace",
+                "2026.904.160522",
+                "qits-workspaces",
+                "env.QITS_WORKSPACE_IMAGE_VERSION")),
+        "the version one tier holds is kept");
+    assertTrue(
+        across.contains(
+            new ImagePinDto(
+                "qits/workspace",
+                "2026.905.9",
+                "qits-workspaces",
+                "env.QITS_WORKSPACE_IMAGE_VERSION")),
+        "and so is the version the other tier holds");
+
+    // The same version in both tiers is ONE fact about the registry, not two: the wire shape has no
+    // env in it, so a duplicated row would say nothing and be counted twice.
+    configuration.upsert(
+        OTHER_ENV,
+        "qits-projects",
+        "env.QITS_PROJECTS_AGENT_IMAGE_VERSION",
+        "2026.904.160152",
+        "alice");
+    assertEquals(
+        1,
+        configuration.imagePins().stream()
+            .filter(pin -> "qits/project-agent-next".equals(pin.image()))
+            .count(),
+        "two tiers on one version report one row");
   }
 
   @Test

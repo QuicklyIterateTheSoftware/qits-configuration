@@ -1,7 +1,6 @@
 package eu.wohlben.qits.configuration.api;
 
 import eu.wohlben.qits.configuration.control.ConfigurationService;
-import eu.wohlben.qits.configuration.control.InstanceEnv;
 import eu.wohlben.qits.configuration.dto.ApplicationSummaryDto;
 import eu.wohlben.qits.configuration.dto.ConfigurationEntryDto;
 import eu.wohlben.qits.configuration.dto.ConfigurationRevisionDto;
@@ -34,9 +33,9 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * <p><b>THE ENV IS A PATH SEGMENT.</b> This service runs on the platform plane and holds every
  * environment's configuration in one store, so the address of a value is {@code
  * /applications/<application>/envs/<env>/...}. That is the whole promotion, expressed where a caller
- * cannot miss it: an edit names the env it edits, and a read names the env it reads. The old
- * env-less spellings are still here, delegating to this instance's legacy env, and every one of them
- * says so in its own javadoc and is removed in the cutover feature.
+ * cannot miss it: an edit names the env it edits, and a read names the env it reads. The env-less
+ * spellings that carried callers across the plane move are gone — they answered for one configured
+ * legacy env, and the last caller of one stopped asking.
  *
  * <p><b>Every route accepts the same pair of roles</b>, {@code qits:admin} (a person, through the
  * gateway's forward-auth headers) and {@code qits:system} (a machine, through a bearer validated
@@ -46,10 +45,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * {@code MachineAuth.require()}. There is no anonymous route here.
  *
  * <p>Request and response shapes are nested records, the platform's controller idiom: the wire
- * contract for one operation lives beside the method that serves it. <b>The env-addressed routes
- * reuse the legacy routes' response records rather than growing parallel ones</b> — the shapes
- * already carry {@code env}, so there is nothing for a second set to say, and a second set would be
- * the thing left behind when the first is deleted.
+ * contract for one operation lives beside the method that serves it.
  */
 @Path("/applications")
 @Produces(MediaType.APPLICATION_JSON)
@@ -59,8 +55,6 @@ public class ConfigurationController {
   @Inject ConfigurationService configuration;
 
   @Inject ConfigurationMapper mapper;
-
-  @Inject InstanceEnv instanceEnv;
 
   @Inject SecurityIdentity identity;
 
@@ -236,110 +230,9 @@ public class ConfigurationController {
         configuration.history(env, application).stream().map(mapper::toDto).toList());
   }
 
-  // ------------------------------------------------------------ transitional
-
-  /**
-   * The env-less resolved read.
-   *
-   * <p><b>TRANSITIONAL.</b> It answers for {@link InstanceEnv#legacyEnv()} — the env this instance's
-   * inherited rows were backfilled with — so a caller written against the environment-plane service
-   * keeps reading the rows it always read across the flip to the platform plane. The deployer is the
-   * caller that matters here, and a deployment failing because this service moved plane would be a
-   * platform-wide outage for a refactoring.
-   *
-   * <p>It is REMOVED in the cutover feature, once every caller addresses an env. Nothing new should
-   * be written against it.
-   */
-  @GET
-  @Path("/{application}/resolved")
-  @Operation(summary = "Deprecated: the resolved read against this instance's legacy environment")
-  @APIResponse(responseCode = "200", description = "The resolved properties and the head revision")
-  @APIResponse(responseCode = "400", description = "The application name is not valid")
-  @RolesAllowed({"qits:admin", "qits:system"})
-  public ResolvedConfigurationDto resolved(@PathParam("application") String application) {
-    return configuration.resolve(instanceEnv.legacyEnv(), application);
-  }
-
-  /**
-   * The env-less entries listing.
-   *
-   * <p><b>TRANSITIONAL</b>, answering for {@link InstanceEnv#legacyEnv()}; see {@link
-   * #resolved(String)}. Removed in the cutover feature.
-   */
-  @GET
-  @Path("/{application}/entries")
-  @Operation(summary = "Deprecated: the entries of this instance's legacy environment")
-  @APIResponse(responseCode = "200", description = "The entries")
-  @APIResponse(responseCode = "400", description = "The application name is not valid")
-  @RolesAllowed({"qits:admin", "qits:system"})
-  public ListEntriesResponse entries(@PathParam("application") String application) {
-    return entriesIn(application, instanceEnv.legacyEnv());
-  }
-
-  /**
-   * The env-less write.
-   *
-   * <p><b>TRANSITIONAL</b>, writing into {@link InstanceEnv#legacyEnv()}; see {@link
-   * #resolved(String)}. It is the one transitional route that MUTATES, and the reason it is kept is
-   * the bootstrap: a seeding script that has not learned the env segment yet would otherwise write
-   * nowhere at all and report success. Removed in the cutover feature.
-   */
-  @PUT
-  @Path("/{application}/entries/{key}")
-  @Operation(summary = "Deprecated: set an entry in this instance's legacy environment")
-  @APIResponse(responseCode = "200", description = "The entry, already present")
-  @APIResponse(responseCode = "201", description = "The entry, newly created")
-  @APIResponse(responseCode = "400", description = "The application, key or value is not valid")
-  @RolesAllowed({"qits:admin", "qits:system"})
-  public Response set(
-      @PathParam("application") String application,
-      @PathParam("key") String key,
-      SetEntryRequest request) {
-    return write(instanceEnv.legacyEnv(), application, key, request);
-  }
-
-  /**
-   * The env-less delete.
-   *
-   * <p><b>TRANSITIONAL</b>, removing from {@link InstanceEnv#legacyEnv()}; see {@link
-   * #resolved(String)}. Removed in the cutover feature.
-   */
-  @DELETE
-  @Path("/{application}/entries/{key}")
-  @Operation(summary = "Deprecated: remove an entry from this instance's legacy environment")
-  @APIResponse(responseCode = "204", description = "Removed")
-  @APIResponse(responseCode = "400", description = "The application or key is not valid")
-  @APIResponse(responseCode = "404", description = "No such entry")
-  @RolesAllowed({"qits:admin", "qits:system"})
-  public Response remove(
-      @PathParam("application") String application, @PathParam("key") String key) {
-    configuration.delete(instanceEnv.legacyEnv(), application, key, actor());
-    return Response.noContent().build();
-  }
-
-  /**
-   * The env-less history.
-   *
-   * <p><b>TRANSITIONAL</b>, reading {@link InstanceEnv#legacyEnv()}; see {@link #resolved(String)}.
-   * Removed in the cutover feature.
-   */
-  @GET
-  @Path("/{application}/history")
-  @Operation(summary = "Deprecated: the history of this instance's legacy environment")
-  @APIResponse(responseCode = "200", description = "The revisions")
-  @APIResponse(responseCode = "400", description = "The application name is not valid")
-  @RolesAllowed({"qits:admin", "qits:system"})
-  public ListHistoryResponse history(@PathParam("application") String application) {
-    return historyIn(application, instanceEnv.legacyEnv());
-  }
-
   // ------------------------------------------------------------ internals
 
-  /**
-   * The write both PUT routes perform, so the 201/200 rule is decided in one place. A transitional
-   * route that answered a different status than its env-addressed twin would be a difference nobody
-   * meant and the suite would have to assert twice.
-   */
+  /** The write behind the PUT route, so the 201/200 rule is decided in one place. */
   private Response write(String env, String application, String key, SetEntryRequest request) {
     boolean existed = exists(env, application, key);
     ConfigurationEntryDto entry =

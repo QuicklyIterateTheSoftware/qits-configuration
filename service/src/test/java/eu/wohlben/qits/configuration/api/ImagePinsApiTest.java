@@ -54,6 +54,9 @@ class ImagePinsApiTest {
 
   private static final String YAML = "application/yaml";
 
+  /** The env this suite pins in. The report reads every env; these tests use one. */
+  private static final String ENV = "test";
+
   /**
    * RestAssured ships no encoder for {@code application/yaml}, so it is told to encode that type as
    * text — the same line {@code DeclarationsApiTest} carries, and for the same reason: the
@@ -76,7 +79,7 @@ class ImagePinsApiTest {
         .contentType(ContentType.JSON)
         .body(new ConfigurationController.SetEntryRequest(value))
         .when()
-        .put(BASE + "/applications/" + application + "/entries/" + key)
+        .put(BASE + "/applications/" + application + "/envs/" + ENV + "/entries/" + key)
         .then()
         .statusCode(oneOf(200, 201));
   }
@@ -127,7 +130,11 @@ class ImagePinsApiTest {
 
     given()
         .when()
-        .delete(BASE + "/applications/qits-workspaces/entries/env.QITS_EDITOR_IMAGE_VERSION")
+        .delete(
+            BASE
+                + "/applications/qits-workspaces/envs/"
+                + ENV
+                + "/entries/env.QITS_EDITOR_IMAGE_VERSION")
         .then()
         .statusCode(204);
 
@@ -194,7 +201,7 @@ class ImagePinsApiTest {
         .statusCode(204);
     given()
         .when()
-        .delete(BASE + "/applications/" + DECLARED_APP + "/entries/" + DECLARED_KEY)
+        .delete(BASE + "/applications/" + DECLARED_APP + "/envs/" + ENV + "/entries/" + DECLARED_KEY)
         .then()
         .statusCode(204);
 

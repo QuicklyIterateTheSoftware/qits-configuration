@@ -17,6 +17,9 @@ class ImportApiTest {
 
   private static final String BASE = "/configuration/api";
 
+  /** The env this suite imports into. Every import names one — there is no default left. */
+  private static final String IMPORT = BASE + "/import?env=test";
+
   private static final String FILE =
       """
       # qits-platform-deployments config volume, exported
@@ -33,7 +36,7 @@ class ImportApiTest {
         .contentType(ContentType.TEXT)
         .body(FILE)
         .when()
-        .post(BASE + "/import")
+        .post(IMPORT)
         .then()
         .statusCode(200)
         .body("imported", equalTo(3))
@@ -42,7 +45,7 @@ class ImportApiTest {
 
     given()
         .when()
-        .get(BASE + "/applications/imp-one/resolved")
+        .get(BASE + "/applications/imp-one/envs/test/resolved")
         .then()
         .statusCode(200)
         .body(
@@ -58,7 +61,7 @@ class ImportApiTest {
         .contentType(ContentType.TEXT)
         .body(FILE)
         .when()
-        .post(BASE + "/import")
+        .post(IMPORT)
         .then()
         .statusCode(200)
         .body("imported", equalTo(0))
@@ -66,7 +69,7 @@ class ImportApiTest {
 
     given()
         .when()
-        .get(BASE + "/applications/imp-one/history")
+        .get(BASE + "/applications/imp-one/envs/test/history")
         .then()
         .statusCode(200)
         .body("revisions.size()", equalTo(2));
@@ -78,7 +81,7 @@ class ImportApiTest {
         .contentType(ContentType.TEXT)
         .body("qits.platform.deployments.extras.imp-bad.volumes[0]=nope\n")
         .when()
-        .post(BASE + "/import")
+        .post(IMPORT)
         .then()
         .statusCode(400)
         .body("message", notNullValue());
@@ -90,8 +93,9 @@ class ImportApiTest {
    * {@code (env, application, key)} and the second import shares only two thirds of that with the
    * first.
    *
-   * <p>The read afterwards is the sharper half: the env-addressed resolved route in the imported env
-   * carries the values, and the one in the legacy env does not know the application at all.
+   * <p>The read afterwards is the sharper half: the resolved route in the imported env carries the
+   * values, and the one in the env this suite otherwise writes does not know the application at
+   * all.
    */
   @Test
   void anImportNamesTheEnvItAsserts() {
@@ -140,29 +144,27 @@ class ImportApiTest {
   }
 
   /**
-   * An import with no {@code env} goes to the legacy env — the transitional default that carries a
-   * bootstrap which has not learned the parameter across the plane flip. It is asserted through the
-   * env-addressed read, so the test says WHICH env the default resolved to rather than merely that
-   * something was written.
+   * An import that does not say which environment it is asserting is a 400. It used to be a guess —
+   * the instance's one configured legacy env — which was right for a caller that predated the
+   * parameter and is a silent write into the wrong tier for everything since.
    */
   @Test
-  void anImportWithoutAnEnvGoesToTheLegacyEnv() {
+  void anImportWithoutAnEnvIs400() {
     given()
         .contentType(ContentType.TEXT)
-        .body("qits.platform.deployments.extras.imp-default.env.QITS_A=one\n")
+        .body("qits.platform.deployments.extras.imp-noenv.env.QITS_A=one\n")
         .when()
         .post(BASE + "/import")
         .then()
-        .statusCode(200)
-        .body("imported", equalTo(1));
+        .statusCode(400)
+        .body("message", notNullValue());
 
     given()
         .when()
-        .get(BASE + "/applications/imp-default/envs/test/entries")
+        .get(BASE + "/applications/imp-noenv/envs/test/entries")
         .then()
         .statusCode(200)
-        .body("entries.size()", equalTo(1))
-        .body("entries[0].env", equalTo("test"));
+        .body("entries.size()", equalTo(0));
   }
 
   @Test
@@ -190,7 +192,7 @@ class ImportApiTest {
         .contentType(ContentType.TEXT)
         .body("")
         .when()
-        .post(BASE + "/import")
+        .post(IMPORT)
         .then()
         .statusCode(200)
         .body("imported", equalTo(0))

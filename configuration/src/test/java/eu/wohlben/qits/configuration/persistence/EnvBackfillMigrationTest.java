@@ -34,10 +34,10 @@ import org.junit.jupiter.api.Test;
  * <p><b>The inserts name their columns.</b> A positional insert would make every later migration a
  * change to a test that had nothing to do with it.
  *
- * <p>The placeholder is passed explicitly here rather than read from config, and the value is the
- * same {@code test} the suite configures as {@code qits.configuration.legacy-env}: this test is about
- * what the SQL does with a value, and wiring it through the config source would put a second
- * mechanism between the assertion and the statement it is about.
+ * <p>The placeholder is passed explicitly here rather than read from config: this test is about what
+ * the SQL does with a value, and wiring it through the config source would put a second mechanism
+ * between the assertion and the statement it is about. The shipped value is a literal now — the
+ * property that used to fill it is gone — and the name kept here is the suite's own.
  */
 @QuarkusTest
 class EnvBackfillMigrationTest {
