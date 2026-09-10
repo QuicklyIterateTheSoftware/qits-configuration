@@ -161,7 +161,7 @@ public class ConfigurationImportIT {
         .contentType(ContentType.TEXT)
         .body(CONFIG_VOLUME_EXPORT)
         .when()
-        .post(StoryTarget.IMPORT_PATH)
+        .post(StoryTarget.IMPORT_REQUEST)
         .then()
         .statusCode(200)
         .body("imported", equalTo(4))
@@ -256,7 +256,7 @@ public class ConfigurationImportIT {
         .contentType(ContentType.TEXT)
         .body(CONFIG_VOLUME_EXPORT)
         .when()
-        .post(StoryTarget.IMPORT_PATH)
+        .post(StoryTarget.IMPORT_REQUEST)
         .then()
         .statusCode(200)
         .body("imported", equalTo(0))
@@ -315,7 +315,7 @@ public class ConfigurationImportIT {
             .contentType(ContentType.TEXT)
             .body(FILE_WITH_A_BAD_LINE)
             .when()
-            .post(StoryTarget.IMPORT_PATH)
+            .post(StoryTarget.IMPORT_REQUEST)
             .then()
             .statusCode(400)
             .extract()
@@ -356,8 +356,8 @@ public class ConfigurationImportIT {
    * own count and head revision, because on a platform instance the useful form of "how is this
    * application configured" is comparative. This story's file is imported into ONE env, so the sum is
    * that env's count and the claim the assertions make is the one they always made. Summing rather
-   * than naming the env keeps the story out of the business of which tier the transitional env-less
-   * import writes into.
+   * than naming the env keeps the assertion about the count rather than about {@link
+   * StoryTarget#TIER}.
    */
   private static int entryCountOf(List<Map<String, Object>> applications, String name) {
     return applications.stream()

@@ -37,8 +37,33 @@ public final class StoryTarget {
   /** The applications overview: every configured application, its entry count and head revision. */
   public static final String APPLICATIONS_PATH = API_PATH + "/applications";
 
+  /**
+   * THE TIER EVERY STORY HERE IS TOLD IN.
+   *
+   * <p>This service holds every environment's configuration in one store, so there is no route to a
+   * value that does not name an env — the env-less spellings that once answered for one configured
+   * one are gone. A story is one platform's account of itself, and this is the name that platform's
+   * tier goes by; the stories are about what the service does with a tier, not about which tier it
+   * is, so one literal serves all of them.
+   *
+   * <p>A stable literal for {@link eu.wohlben.qits.userflows.Labels}' sake, like every application
+   * name here: a stamped one would move every {@code networkHash} on every run.
+   */
+  public static final String TIER = "dev";
+
   /** The bulk import: {@code text/plain}, an extras properties file whole. */
   public static final String IMPORT_PATH = API_PATH + "/import";
+
+  /**
+   * The import AS A CALLER SENDS IT — the path plus the env it asserts. The env is a query parameter
+   * and it is REQUIRED: the file's grammar has nowhere to put a tier, so the assertion is the
+   * caller's and covers the whole file.
+   *
+   * <p>Two constants rather than one, because the capture and the caller see different strings. An
+   * edge is recorded under the PATH with no query on it, so a report expecting {@code ?env=} would
+   * be looking for an edge that is never recorded under that name.
+   */
+  public static final String IMPORT_REQUEST = IMPORT_PATH + "?env=" + TIER;
 
   private StoryTarget() {}
 
@@ -47,17 +72,22 @@ public final class StoryTarget {
     return APPLICATIONS_PATH + "/" + application;
   }
 
+  /** One application's subtree IN ONE ENV, which is where every entry route hangs off. */
+  public static String envPath(String application) {
+    return applicationPath(application) + "/envs/" + TIER;
+  }
+
   /**
    * <b>The deployer's read.</b> One application's configuration as a flat map at the full {@code
    * qits.platform.deployments.extras.<app>.<key>} spelling, plus the revision it was read at.
    */
   public static String resolvedPath(String application) {
-    return applicationPath(application) + "/resolved";
+    return envPath(application) + "/resolved";
   }
 
   /** One application's current entries, by key — the editor's read. */
   public static String entriesPath(String application) {
-    return applicationPath(application) + "/entries";
+    return envPath(application) + "/entries";
   }
 
   /** One entry: {@code PUT} sets it, {@code DELETE} removes it and keeps it in the history. */
@@ -67,7 +97,7 @@ public final class StoryTarget {
 
   /** One application's whole write history, newest first. Deletions are in it, with a null value. */
   public static String historyPath(String application) {
-    return applicationPath(application) + "/history";
+    return envPath(application) + "/history";
   }
 
   /**
