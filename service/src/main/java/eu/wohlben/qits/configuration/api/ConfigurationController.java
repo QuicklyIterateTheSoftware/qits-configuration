@@ -85,7 +85,7 @@ public class ConfigurationController {
   @GET
   @Operation(summary = "Every configured application, with per-environment counts and revisions")
   @APIResponse(responseCode = "200", description = "The applications")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public ListApplicationsResponse applications() {
     return new ListApplicationsResponse(configuration.applications());
   }
@@ -133,7 +133,7 @@ public class ConfigurationController {
   @APIResponse(
       responseCode = "422",
       description = "A serviceAddress addresses an application that has not declared its plane")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public ResolvedConfigurationDto resolvedIn(
       @PathParam("application") String application,
       @PathParam("env") String env,
@@ -156,7 +156,7 @@ public class ConfigurationController {
   @Operation(summary = "One application's current entries in one environment")
   @APIResponse(responseCode = "200", description = "The entries")
   @APIResponse(responseCode = "400", description = "The environment or application name is invalid")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public ListEntriesResponse entriesIn(
       @PathParam("application") String application, @PathParam("env") String env) {
     return new ListEntriesResponse(configuration.entryViews(env, application));
@@ -223,7 +223,7 @@ public class ConfigurationController {
   @Operation(summary = "One application's write history in one environment, newest first")
   @APIResponse(responseCode = "200", description = "The revisions")
   @APIResponse(responseCode = "400", description = "The environment or application name is invalid")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public ListHistoryResponse historyIn(
       @PathParam("application") String application, @PathParam("env") String env) {
     return new ListHistoryResponse(

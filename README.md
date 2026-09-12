@@ -101,7 +101,8 @@ qits-platform-idp) — **except the two declaration writes, which take `qits:sys
 call `MachineAuth.require()`**. That is not a claim that declarations are more dangerous than
 entries; it is that every other route records a *decision*, which a person may legitimately make,
 while a declaration records an *asserted fact about a build*, which only the pipeline that built it
-can honestly make. There is no anonymous route.
+can honestly make. Every `GET` also accepts `qits:agent`, the role an agent holds on its own token. There is
+no anonymous route.
 
 | route | what it answers |
 | --- | --- |
