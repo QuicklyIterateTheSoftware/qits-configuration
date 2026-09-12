@@ -89,6 +89,13 @@
             <artifactId>quarkus-smallrye-openapi</artifactId>
         </dependency>
         <dependency>
+            <!-- OTLP export to qits-observability. The extension is what instruments the process;
+                 the endpoint and protocol in application.properties are what make it arrive, since
+                 the defaults are gRPC to localhost:4317 and the receiver speaks HTTP/protobuf. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-opentelemetry</artifactId>
+        </dependency>
+        <dependency>
             <!-- The platform event bus client. Joining it here turns this deployable into a
                  subscriber: the outbox's datasource, its Flyway lineage, the durable-consumer tables
                  and the catch-up sweeper all arrive with this jar, configured by the defaults it
